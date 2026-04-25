@@ -33,8 +33,8 @@ falls back to polling — nothing breaks.
 ## Requirements
 
 - Grav 2.0+
-- `grav-plugin-sync` 0.1+
-- `grav-plugin-api` 1.0.0-beta.12+ (the host for the API endpoint)
+- `grav-plugin-sync` 1.0.0+
+- `grav-plugin-api` 1.0.0-beta.13+ (the host for the API endpoint)
 - PHP 8.3+ (for the plugin itself; the hub binary is a Go executable
   with no PHP runtime requirement)
 - A Mercure hub (this plugin can manage one for you locally; production
