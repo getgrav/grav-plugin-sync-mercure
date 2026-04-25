@@ -1,7 +1,7 @@
 name: Sync Mercure
 slug: sync-mercure
 type: plugin
-version: 0.1.0
+version: 1.0.0
 description: Mercure transport for grav-plugin-sync. Replaces HTTP polling with a Mercure SSE hub for sub-100ms collaborative editing latency. Optional — falls back to polling when the hub isn't reachable.
 icon: bolt
 author:
@@ -15,9 +15,9 @@ compatibility:
   grav: ['2.0']
 
 dependencies:
-  - { name: grav, version: '>=2.0.0-beta.1' }
-  - { name: api, version: '>=1.0.0-beta.12' }
-  - { name: sync, version: '>=0.1.0' }
+  - { name: grav, version: '>=2.0.0-beta.2' }
+  - { name: api, version: '>=1.0.0-beta.13' }
+  - { name: sync, version: '>=1.0.0' }
 
 form:
   validation: loose
