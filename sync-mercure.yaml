@@ -1,0 +1,15 @@
+enabled: true
+
+hub:
+  public_url: ''
+  internal_url: ''
+  publisher_secret: ''
+  subscriber_secret: ''
+
+topics:
+  prefix: 'urn:grav:sync:'
+
+# JWT TTL for subscriber tokens issued to admin2 clients (seconds).
+# Short TTL (a few minutes) is fine — clients will request a fresh token
+# on reconnect via the same /sync/mercure/token endpoint.
+token_ttl_seconds: 600

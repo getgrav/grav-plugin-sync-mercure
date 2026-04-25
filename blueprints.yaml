@@ -1,0 +1,71 @@
+name: Sync Mercure
+slug: sync-mercure
+type: plugin
+version: 0.1.0
+description: Mercure transport for grav-plugin-sync. Replaces HTTP polling with a Mercure SSE hub for sub-100ms collaborative editing latency. Optional — falls back to polling when the hub isn't reachable.
+icon: bolt
+author:
+  name: Team Grav
+  email: devs@getgrav.org
+  url: https://getgrav.org
+homepage: https://github.com/getgrav/grav-plugin-sync-mercure
+keywords: collaboration, mercure, sse, realtime, sync
+license: MIT
+compatibility:
+  grav: ['2.0']
+
+dependencies:
+  - { name: grav, version: '>=2.0.0-beta.1' }
+  - { name: api, version: '>=1.0.0-beta.12' }
+  - { name: sync, version: '>=0.1.0' }
+
+form:
+  validation: loose
+  fields:
+    enabled:
+      type: toggle
+      label: Plugin Status
+      highlight: 1
+      default: 1
+      options:
+        1: Enabled
+        0: Disabled
+      validate:
+        type: bool
+
+    section_hub:
+      type: section
+      title: Mercure Hub
+      underline: true
+
+    hub.public_url:
+      type: text
+      label: Public Hub URL
+      placeholder: https://localhost:3001/.well-known/mercure
+      help: URL the browser uses to subscribe to the Mercure hub. Must be reachable from the client. Leave blank to disable Mercure transport (clients will fall back to polling).
+
+    hub.internal_url:
+      type: text
+      label: Internal Hub URL
+      help: URL PHP uses to publish to the hub. Often the same as public URL; useful when running Mercure on a private network behind a reverse proxy. Defaults to public URL when blank.
+
+    hub.publisher_secret:
+      type: password
+      label: Publisher JWT Secret
+      help: HMAC secret PHP signs publisher JWTs with. Must match the hub's PUBLISHER_JWT_KEY env var.
+
+    hub.subscriber_secret:
+      type: password
+      label: Subscriber JWT Secret
+      help: HMAC secret PHP signs subscriber JWTs with. Must match the hub's SUBSCRIBER_JWT_KEY env var. Often the same as publisher secret in single-tenant setups.
+
+    section_topics:
+      type: section
+      title: Topics
+      underline: true
+
+    topics.prefix:
+      type: text
+      label: Topic Prefix
+      default: 'urn:grav:sync:'
+      help: URI prefix for room topics. Combined with the canonical room id ("<route>[.<lang>]@<template>") to form the topic the hub fans out on.

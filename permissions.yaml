@@ -1,0 +1,7 @@
+actions:
+  api.collab.mercure:
+    type: access
+    label: Mercure Subscriber Token
+    actions:
+      issue:
+        label: Issue subscriber JWTs for hub subscriptions

@@ -1,0 +1,45 @@
+{
+    "name": "getgrav/grav-plugin-sync-mercure",
+    "type": "grav-plugin",
+    "description": "Mercure SSE transport for grav-plugin-sync collaborative editing.",
+    "keywords": ["collaboration", "mercure", "sse", "realtime", "sync", "plugin"],
+    "homepage": "https://github.com/getgrav/grav-plugin-sync-mercure",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Team Grav",
+            "email": "devs@getgrav.org",
+            "homepage": "https://getgrav.org",
+            "role": "Developer"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/getgrav/grav-plugin-sync-mercure/issues"
+    },
+    "require": {
+        "php": "^8.3",
+        "ext-json": "*",
+        "firebase/php-jwt": "^6.10 || ^7.0"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Grav\\Plugin\\SyncMercure\\": "classes/SyncMercure"
+        },
+        "classmap": [
+            "sync-mercure.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Grav\\Plugin\\SyncMercure\\Tests\\": "tests"
+        }
+    },
+    "config": {
+        "platform": {
+            "php": "8.3"
+        }
+    }
+}
