@@ -72,11 +72,21 @@ class StartCommand extends MercureCommandBase
             array_values($env),
         ));
 
-        $cmd = 'cd ' . escapeshellarg($base)
-            . ' && ' . $envStr
+        // `exec` replaces the subshell with the env-then-mercure process so
+        // the PID we capture in the pidfile *is* the mercure PID. Without
+        // exec, `$!` was the subshell wrapper, which exits when mercure
+        // exits and leaves an orphan if you tried to stop it (the stop
+        // command would kill the long-dead wrapper instead of mercure).
+        // `exec env VAR=val ... cmd ...` replaces the subshell with env(1),
+        // which in turn exec's mercure — keeping a single PID across the
+        // chain so $! captured outside is mercure's actual PID. Plain
+        // `VAR=val cmd` syntax doesn't work after `exec` because exec
+        // requires a command name, not an assignment.
+        $cmd = '(cd ' . escapeshellarg($base)
+            . ' && exec env ' . $envStr
             . ' ' . escapeshellarg($binPath)
             . ' run --config ' . escapeshellarg($caddyConf)
-            . ' > ' . escapeshellarg($logFile) . ' 2>&1 & echo $! > ' . escapeshellarg($pidFile);
+            . ' > ' . escapeshellarg($logFile) . ' 2>&1) & echo $! > ' . escapeshellarg($pidFile);
 
         exec('(' . $cmd . ') > /dev/null 2>&1');
         sleep(1);
