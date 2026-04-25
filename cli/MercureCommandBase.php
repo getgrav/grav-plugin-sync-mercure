@@ -64,20 +64,97 @@ abstract class MercureCommandBase extends ConsoleCommand
         return $this->getDataDir() . '/Caddyfile';
     }
 
+    protected function certPath(): string
+    {
+        return $this->getDataDir() . '/cert.pem';
+    }
+
+    protected function keyPath(): string
+    {
+        return $this->getDataDir() . '/key.pem';
+    }
+
     /**
-     * Write a Caddyfile that runs the embedded Mercure module on :3001.
-     * For dev only — production deployments should front the hub with
-     * their own reverse proxy and proper TLS.
+     * Ensure a TLS cert+key pair exists for the hub. Strategy:
+     *
+     *   1. If cert.pem and key.pem already sit in the data dir, reuse.
+     *   2. If `mkcert` is on PATH, use it. mkcert installs a local CA
+     *      root in the system trust store on first run, so browsers
+     *      trust the resulting cert without any warnings — exactly the
+     *      Symfony-recommended local-dev setup.
+     *   3. Otherwise fall back to a self-signed cert via openssl. Browsers
+     *      will show a one-time warning the first time the user visits
+     *      https://localhost:3001/healthz; once accepted, EventSource
+     *      connections work for the lifetime of that exception.
+     *
+     * Returns ['cert' => …, 'key' => …, 'tool' => 'mkcert'|'openssl'|'reused'].
      */
-    protected function writeCaddyfile(): string
+    protected function ensureCert(): array
+    {
+        $cert = $this->certPath();
+        $key = $this->keyPath();
+        if (is_file($cert) && is_file($key)) {
+            return ['cert' => $cert, 'key' => $key, 'tool' => 'reused'];
+        }
+
+        $dataDir = $this->ensureDataDir();
+        $hosts = ['localhost', '127.0.0.1', '::1'];
+
+        if ($this->commandExists('mkcert')) {
+            $rc = 0;
+            $cmd = 'cd ' . escapeshellarg($dataDir)
+                . ' && mkcert -cert-file ' . escapeshellarg($cert)
+                . ' -key-file ' . escapeshellarg($key)
+                . ' ' . implode(' ', array_map('escapeshellarg', $hosts));
+            passthru($cmd, $rc);
+            if ($rc === 0 && is_file($cert) && is_file($key)) {
+                return ['cert' => $cert, 'key' => $key, 'tool' => 'mkcert'];
+            }
+        }
+
+        if (!$this->commandExists('openssl')) {
+            throw new \RuntimeException(
+                'Neither mkcert nor openssl found on PATH. Install one of them, '
+                . 'or pre-place cert.pem and key.pem in ' . $dataDir
+            );
+        }
+
+        $san = 'subjectAltName=DNS:localhost,IP:127.0.0.1,IP:0:0:0:0:0:0:0:1';
+        $cmd = 'openssl req -x509 -newkey rsa:2048 -nodes'
+            . ' -keyout ' . escapeshellarg($key)
+            . ' -out ' . escapeshellarg($cert)
+            . ' -days 3650 -subj /CN=localhost'
+            . ' -addext ' . escapeshellarg($san)
+            . ' 2>/dev/null';
+        $rc = 0;
+        passthru($cmd, $rc);
+        if ($rc !== 0 || !is_file($cert) || !is_file($key)) {
+            throw new \RuntimeException('openssl failed to generate cert; check that openssl is functional.');
+        }
+        return ['cert' => $cert, 'key' => $key, 'tool' => 'openssl'];
+    }
+
+    private function commandExists(string $cmd): bool
+    {
+        $out = [];
+        $rc = 0;
+        @exec('command -v ' . escapeshellarg($cmd) . ' 2>/dev/null', $out, $rc);
+        return $rc === 0 && !empty($out);
+    }
+
+    /**
+     * Write a Caddyfile that runs the embedded Mercure module on :3001
+     * with HTTPS using a cert pair from $this->ensureCert().
+     */
+    protected function writeCaddyfile(string $certFile, string $keyFile): string
     {
         $confPath = $this->caddyfilePath();
-        $conf = <<<'CADDY'
-{
+        $conf = '{
     auto_https off
 }
 
 :3001 {
+    tls ' . $certFile . ' ' . $keyFile . '
     encode zstd gzip
 
     mercure {
@@ -89,7 +166,7 @@ abstract class MercureCommandBase extends ConsoleCommand
 
     respond /healthz 200
 }
-CADDY;
+';
         file_put_contents($confPath, $conf);
         return $confPath;
     }
@@ -188,8 +265,8 @@ CADDY;
             $changes[] = 'subscriber_secret (matched to publisher)';
         }
         if (empty($hub['public_url'])) {
-            $hub['public_url'] = 'http://localhost:3001/.well-known/mercure';
-            $changes[] = 'public_url (localhost default)';
+            $hub['public_url'] = 'https://localhost:3001/.well-known/mercure';
+            $changes[] = 'public_url (https://localhost:3001 default)';
         }
 
         if ($changes === []) {

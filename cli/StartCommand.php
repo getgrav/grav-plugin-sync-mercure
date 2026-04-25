@@ -59,7 +59,27 @@ class StartCommand extends MercureCommandBase
             return 1;
         }
 
-        $caddyConf = $this->writeCaddyfile();
+        // Generate (or reuse) a TLS cert for the hub. mkcert if available
+        // for trusted-by-browsers certs, otherwise self-signed. Without
+        // TLS the hub can't be reached from an HTTPS-served admin-next
+        // because of mixed-content blocking.
+        try {
+            $certInfo = $this->ensureCert();
+            if ($certInfo['tool'] !== 'reused') {
+                $io->writeln('Generated TLS cert via ' . $certInfo['tool'] . ' at ' . $certInfo['cert']);
+                if ($certInfo['tool'] === 'openssl') {
+                    $io->note(
+                        'Self-signed cert in use. Visit https://localhost:3001/healthz '
+                        . 'in each browser once to accept the cert.'
+                    );
+                }
+            }
+        } catch (\Throwable $e) {
+            $io->error($e->getMessage());
+            return 1;
+        }
+
+        $caddyConf = $this->writeCaddyfile($certInfo['cert'], $certInfo['key']);
         $logFile = $this->logFile();
 
         $env = [
@@ -102,7 +122,7 @@ class StartCommand extends MercureCommandBase
         }
         $publicUrl = (string)\Grav\Common\Grav::instance()['config']->get(
             'plugins.sync-mercure.hub.public_url',
-            'http://localhost:3001/.well-known/mercure'
+            'https://localhost:3001/.well-known/mercure'
         );
         $io->success("Started Mercure (pid {$pid}) at {$publicUrl}");
         $io->writeln('Hard-reload admin2 to pick up the new transport.');
