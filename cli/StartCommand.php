@@ -40,10 +40,22 @@ class StartCommand extends MercureCommandBase
             @unlink($pidFile);
         }
 
-        $publisherSecret = $this->getSecret('publisher');
-        $subscriberSecret = $this->getSecret('subscriber') ?: $publisherSecret;
+        // Idempotent — generates secrets / public_url only if missing.
+        // Lets `start` succeed even if the user skipped `install` (or
+        // skipped editing the config before running it).
+        $cfg = $this->ensureConfig();
+        if ($cfg['changes'] !== []) {
+            $io->writeln('Generated config at ' . $cfg['path'] . ':');
+            foreach ($cfg['changes'] as $c) $io->writeln("  • {$c}");
+        }
+
+        // Read secrets via Grav config (cache was busted in ensureConfig);
+        // fall back to the freshly-generated values to avoid a race on
+        // very fast invocations.
+        $publisherSecret = $this->getSecret('publisher') ?: ($cfg['hub']['publisher_secret'] ?? '');
+        $subscriberSecret = $this->getSecret('subscriber') ?: ($cfg['hub']['subscriber_secret'] ?? $publisherSecret);
         if ($publisherSecret === '') {
-            $io->error('Set plugins.sync-mercure.hub.publisher_secret (and ideally subscriber_secret) before starting the hub.');
+            $io->error('Could not establish a publisher secret. Check ' . $cfg['path']);
             return 1;
         }
 
@@ -78,8 +90,12 @@ class StartCommand extends MercureCommandBase
             $io->error('Process exited immediately. See ' . $logFile);
             return 1;
         }
-        $io->success("Started Mercure (pid {$pid}) on http://localhost:3001/.well-known/mercure");
-        $io->writeln('Set hub.public_url to that URL in plugins/sync-mercure.yaml.');
+        $publicUrl = (string)\Grav\Common\Grav::instance()['config']->get(
+            'plugins.sync-mercure.hub.public_url',
+            'http://localhost:3001/.well-known/mercure'
+        );
+        $io->success("Started Mercure (pid {$pid}) at {$publicUrl}");
+        $io->writeln('Hard-reload admin2 to pick up the new transport.');
         return 0;
     }
 }
