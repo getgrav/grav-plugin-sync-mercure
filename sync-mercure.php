@@ -195,13 +195,12 @@ class SyncMercurePlugin extends Plugin
         $bridge = $this->bridge();
         if (!$bridge || !$bridge->isEnabled()) return;
 
+        // Transport advertisement (id, name, priority, supports) and the
+        // controller's `preferred` selection now come from the
+        // TransportRegistry — see SyncController::capabilities(). All this
+        // listener still does is contribute the mercure-specific metadata
+        // block clients need to actually subscribe (hub URL + topic prefix).
         $caps = $event['capabilities'] ?? [];
-        $transports = $caps['transports'] ?? [];
-        if (!in_array('mercure', $transports, true)) {
-            $transports[] = 'mercure';
-        }
-        $caps['transports'] = $transports;
-        $caps['preferred'] = 'mercure';
         $caps['mercure'] = [
             'hub' => $bridge->publicUrl(),
             'topic_prefix' => $bridge->topicPrefix(),

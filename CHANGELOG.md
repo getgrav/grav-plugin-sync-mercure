@@ -3,6 +3,8 @@
 
 1. [](#new)
     * Ships `sync-mercure-client.js` (`window.SyncMercure`). The Mercure subscriber JS that comments-pro previously bundled now lives here and is auto-enqueued for consumer plugins on the frontend.
+2. [](#improved)
+    * Mercure now appears in the capabilities response as a properly-structured transport entry (id, name, priority, supported message types) sourced from the transport registry, instead of a bare string entry stitched in by the capabilities listener.
 
 # v1.0.1
 ## 05/09/2026
