@@ -8,20 +8,27 @@ use Composer\Autoload\ClassLoader;
 use Grav\Common\Plugin;
 use Grav\Events\PermissionsRegisterEvent;
 use Grav\Framework\Acl\PermissionsReader;
+use Grav\Plugin\Sync\Transport\TransportRegistry;
 use Grav\Plugin\SyncMercure\MercureBridge;
 use Grav\Plugin\SyncMercure\MercureController;
+use Grav\Plugin\SyncMercure\MercureTransport;
 use RocketTheme\Toolbox\Event\Event;
 
 /**
- * grav-plugin-sync-mercure — Mercure SSE transport for grav-plugin-sync.
+ * grav-plugin-sync-mercure (Mercure SSE transport for grav-plugin-sync, plus
+ * a generic Mercure bridge any Grav plugin can use).
  *
  * Pure side-car: doesn't replace any existing endpoints. Adds:
  *
- *   - $grav['sync_mercure_bridge'] service
- *   - POST /sync/mercure/token (subscriber JWT issuance)
- *   - onSyncUpdate listener → publish doc updates to hub
- *   - onSyncAwareness listener → publish awareness deltas to hub
- *   - onSyncCapabilities listener → advertise mercure transport
+ *   - $grav['mercure']             canonical public service name (any plugin
+ *                                  can fetch this and call publishTopic /
+ *                                  issueSubscriberJwtForTopics)
+ *   - $grav['sync_mercure_bridge'] kept-for-compat alias (same instance);
+ *                                  used by grav-plugin-sync internally
+ *   - POST /sync/mercure/token     subscriber JWT issuance for sync rooms
+ *   - onSyncUpdate listener        publishes doc updates to the hub
+ *   - onSyncAwareness listener     publishes awareness deltas to the hub
+ *   - onSyncCapabilities listener  advertises mercure transport
  *
  * The hub itself runs as a separate process (see bin/plugin sync-mercure).
  */
@@ -36,6 +43,8 @@ class SyncMercurePlugin extends Plugin
         return [
             'onPluginsInitialized'        => [['onPluginsInitialized', 1000]],
             'onApiRegisterRoutes'         => ['onApiRegisterRoutes', 0],
+            'onAssetsInitialized'         => ['onAssetsInitialized', 0],
+            'onSyncRegisterTransports'    => ['onSyncRegisterTransports', 0],
             'onSyncUpdate'                => ['onSyncUpdate', 0],
             'onSyncAwareness'             => ['onSyncAwareness', 0],
             'onSyncCapabilities'          => ['onSyncCapabilities', 0],
@@ -54,8 +63,16 @@ class SyncMercurePlugin extends Plugin
             return;
         }
 
-        $this->grav['sync_mercure_bridge'] = function (): MercureBridge {
+        // Define the factory once and register it under both keys. Pimple
+        // shares the result of each closure independently, so to guarantee
+        // the two service keys resolve to the SAME object we register the
+        // canonical key first then alias it through a closure that fetches
+        // the canonical instance.
+        $this->grav['mercure'] = function (): MercureBridge {
             return new MercureBridge($this->config);
+        };
+        $this->grav['sync_mercure_bridge'] = function ($c): MercureBridge {
+            return $c['mercure'];
         };
     }
 
@@ -71,9 +88,66 @@ class SyncMercurePlugin extends Plugin
     }
 
     /**
+     * Enqueue the generic Mercure subscriber SDK on frontend pages so any
+     * consumer plugin (comments-pro today; future plugins later) can call
+     * window.SyncMercure.init(config, handlers) without bundling its own
+     * EventSource client.
+     *
+     * Frontend only. Admin-next loads its Mercure client through its own
+     * editor-pro / collab bundles, so injecting this script there would
+     * just add weight without being used.
+     */
+    public function onAssetsInitialized(): void
+    {
+        if (!$this->config->get('plugins.sync-mercure.enabled')) {
+            return;
+        }
+        if ($this->isAdmin()) {
+            return;
+        }
+
+        /** @var \Grav\Common\Assets $assets */
+        $assets = $this->grav['assets'];
+        $assets->addJs(
+            'plugin://sync-mercure/assets/js/sync-mercure-client.js',
+            ['group' => 'bottom']
+        );
+    }
+
+    /**
+     * Register MercureTransport with sync's pluggable transport registry
+     * (Round 4a). The transport handles the new facade-driven publish
+     * path (Crdt, Broadcast, Awareness) for any channel whose owner
+     * plugin opts in. The legacy onSyncUpdate / onSyncAwareness
+     * subscribers below remain in place this round so editor-pro's
+     * existing CodeMirror collab path keeps producing the same wire
+     * output it always did; both pipelines coexist.
+     */
+    public function onSyncRegisterTransports(Event $event): void
+    {
+        if (!$this->config->get('plugins.sync-mercure.enabled')) {
+            return;
+        }
+
+        if (!$this->grav->offsetExists('mercure')) {
+            return;
+        }
+
+        /** @var TransportRegistry|null $registry */
+        $registry = $event['transports'] ?? null;
+        if (!$registry instanceof TransportRegistry) {
+            return;
+        }
+
+        /** @var MercureBridge $bridge */
+        $bridge = $this->grav['mercure'];
+        $registry->register(new MercureTransport($bridge));
+    }
+
+    /**
      * Republish Yjs doc updates to the Mercure hub for the room's "doc"
      * channel. Subscribers receive within milliseconds and apply the
-     * update to their local Y.Doc — same as if it had been pulled.
+     * update to their local Y.Doc, same as if it had been pulled.
      */
     public function onSyncUpdate(Event $event): void
     {
