@@ -1,5 +1,5 @@
 # v1.1.0
-## 05/12/2026
+## 05/13/2026
 
 1. [](#new)
     * Ships `sync-mercure-client.js` (`window.SyncMercure`). The Mercure subscriber JS that comments-pro previously bundled now lives here and is auto-enqueued for consumer plugins on the frontend.
