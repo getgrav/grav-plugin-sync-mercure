@@ -26,9 +26,12 @@
  *       Both `handlers` and `config` are passed in by the consumer plugin;
  *       this SDK does not know which plugin it is serving.
  *
- *   sendTyping(action): void
+ *   sendTyping(action, extras): void
  *     action is 'start' or 'stop'. Throttled to once per heartbeatSeconds for
  *     'start'; 'stop' always sends. Heartbeat re-POSTs while active.
+ *     extras is an optional plain object whose keys are merged into the POST
+ *     body (e.g. { parent_id: '123' }) — the SDK is agnostic to their meaning
+ *     and the server is expected to relay them back in the broadcast payload.
  *
  *   disconnect(): void
  *     Closes the EventSource, clears all timers, and forgets typing state.
@@ -41,11 +44,12 @@
   var es = null;                  // active EventSource, or null
   var consecutiveErrors = 0;      // reconnect-failure counter for failover
   var failedOver = false;         // latches once we hand off to polling
-  var typingMap = null;           // Map<userId, lastSeenTs>
+  var typingMap = null;           // Map<userId, {ts, meta}> — meta = server-relayed extras
   var typingTickTimer = null;     // 1s eviction tick timer
   var typingHeartbeatTimer = null; // local "I am typing" heartbeat timer
   var lastTypingSendTs = 0;       // throttle guard for sendTyping
   var lastTypingAction = null;    // 'start' | 'stop' | null
+  var lastTypingExtras = null;    // extras carried with the active 'start' so heartbeats keep the same scope
   var activeConfig = null;
   var activeHandlers = null;
 
@@ -69,9 +73,20 @@
     if (!activeHandlers || typeof activeHandlers.onTypingChange !== 'function') return;
     if (!typingMap) return;
     try {
-      var keys = [];
-      typingMap.forEach(function(_v, k) { keys.push(k); });
-      activeHandlers.onTypingChange(keys);
+      // Pass an array of {userId, ...meta}: the SDK keeps userId as the
+      // canonical key but lets each consumer plugin attach its own context
+      // (e.g. comments-pro reads parent_id and displayName from meta).
+      var users = [];
+      typingMap.forEach(function(entry, userId) {
+        var u = { userId: userId };
+        if (entry && entry.meta) {
+          Object.keys(entry.meta).forEach(function(k) {
+            if (k !== 'userId') u[k] = entry.meta[k];
+          });
+        }
+        users.push(u);
+      });
+      activeHandlers.onTypingChange(users);
     } catch (e) {
       console.warn('SyncMercure: onTypingChange handler threw', e);
     }
@@ -84,8 +99,8 @@
       if (!typingMap) return;
       var cutoff = Date.now() - ttlMs;
       var changed = false;
-      typingMap.forEach(function(lastSeenTs, k) {
-        if (lastSeenTs < cutoff) {
+      typingMap.forEach(function(entry, k) {
+        if (entry.ts < cutoff) {
           typingMap.delete(k);
           changed = true;
         }
@@ -177,7 +192,19 @@
       var userId = payload.userId || payload.user || null;
       if (!userId) return;
       if (payload.action === 'start') {
-        typingMap.set(userId, payload.ts ? (payload.ts * 1000) : Date.now());
+        // Stash every server-supplied field other than the wire-protocol keys
+        // as `meta`, so consumer plugins can read e.g. parent_id/displayName
+        // back out via onTypingChange without this SDK needing to know them.
+        var meta = {};
+        Object.keys(payload).forEach(function(k) {
+          if (k !== 'action' && k !== 'userId' && k !== 'user' && k !== 'ts') {
+            meta[k] = payload[k];
+          }
+        });
+        typingMap.set(userId, {
+          ts: payload.ts ? (payload.ts * 1000) : Date.now(),
+          meta: meta
+        });
         notifyTypingChange();
       } else if (payload.action === 'stop') {
         if (typingMap.delete(userId)) {
@@ -247,17 +274,21 @@
       }
     },
 
-    sendTyping: function(action) {
+    sendTyping: function(action, extras) {
       try {
         if (!activeConfig || !activeConfig.typingPostUrl) return;
         if (action !== 'start' && action !== 'stop') return;
 
         var heartbeatSeconds = activeConfig.heartbeatSeconds || 5;
         var now = Date.now();
+        var safeExtras = (extras && typeof extras === 'object') ? extras : null;
 
         // Throttle: never POST more than once per heartbeatSeconds.
         if (action === 'start' && (now - lastTypingSendTs) < (heartbeatSeconds * 1000)) {
-          // Still ensure the heartbeat is running; just skip this POST.
+          // Still ensure the heartbeat is running; just skip this POST. Keep
+          // the latest extras so the heartbeat re-sends them, in case the
+          // caller switched scope (e.g. focused a different reply form).
+          lastTypingExtras = safeExtras;
           if (!typingHeartbeatTimer) {
             scheduleHeartbeat(heartbeatSeconds);
           }
@@ -267,12 +298,20 @@
 
         lastTypingSendTs = now;
         lastTypingAction = action;
+        lastTypingExtras = (action === 'start') ? safeExtras : null;
+
+        var body = { action: action, ts: now };
+        if (safeExtras) {
+          Object.keys(safeExtras).forEach(function(k) {
+            if (k !== 'action' && k !== 'ts') body[k] = safeExtras[k];
+          });
+        }
 
         fetch(activeConfig.typingPostUrl, {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: action, ts: now })
+          body: JSON.stringify(body)
         }).catch(function(e) {
           // Silent fail; typing is best-effort.
           console.warn('SyncMercure: typing POST failed', e);
@@ -303,6 +342,7 @@
         if (typingMap) typingMap.clear();
         typingMap = null;
         lastTypingAction = null;
+        lastTypingExtras = null;
         lastTypingSendTs = 0;
         consecutiveErrors = 0;
         // Keep failedOver as-is so we don't accidentally re-init mid-failover.
@@ -322,11 +362,17 @@
         return;
       }
       lastTypingSendTs = Date.now();
+      var body = { action: 'start', ts: lastTypingSendTs };
+      if (lastTypingExtras) {
+        Object.keys(lastTypingExtras).forEach(function(k) {
+          if (k !== 'action' && k !== 'ts') body[k] = lastTypingExtras[k];
+        });
+      }
       fetch(activeConfig.typingPostUrl, {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'start', ts: lastTypingSendTs })
+        body: JSON.stringify(body)
       }).catch(function(e) {
         console.warn('SyncMercure: typing heartbeat POST failed', e);
       });

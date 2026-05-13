@@ -1,10 +1,12 @@
 # v1.1.0
-## 05/10/2026
+## 05/12/2026
 
 1. [](#new)
     * Ships `sync-mercure-client.js` (`window.SyncMercure`). The Mercure subscriber JS that comments-pro previously bundled now lives here and is auto-enqueued for consumer plugins on the frontend.
 2. [](#improved)
     * Mercure now appears in the capabilities response as a properly-structured transport entry (id, name, priority, supported message types) sourced from the transport registry, instead of a bare string entry stitched in by the capabilities listener.
+3. [](#bugfix)
+    * Typing indicators (and any other awareness-typed message) now actually reach subscribers. Awareness events publish to the channel's own topic with a flat envelope instead of a `:awareness`-suffixed topic the client never listened to.
 
 # v1.0.1
 ## 05/09/2026

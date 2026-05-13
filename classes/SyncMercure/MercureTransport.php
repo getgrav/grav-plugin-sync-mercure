@@ -148,11 +148,15 @@ final class MercureTransport implements TransportInterface
 
     private function publishAwareness(Channel $channel, AwarenessMessage $message): void
     {
-        $topic = 'urn:grav:' . $channel->id . ':awareness';
-        $this->bridge->publishTopic($topic, [
-            'payload' => $message->payload,
-            'sourceClientId' => $message->sourceClientId,
-        ]);
+        // Publish to the channel's own topic so subscribers that listen to it
+        // as a Broadcast sub-topic (via `subscribeSubTopics`) receive the
+        // event. The payload is spread flat alongside `sourceClientId` so the
+        // JS client can dispatch on a top-level discriminator (e.g. `action`)
+        // without unwrapping a nested envelope.
+        $topic = 'urn:grav:' . $channel->id;
+        $envelope = $message->payload;
+        $envelope['sourceClientId'] = $message->sourceClientId;
+        $this->bridge->publishTopic($topic, $envelope);
     }
 
     /**
@@ -163,7 +167,10 @@ final class MercureTransport implements TransportInterface
      *   Broadcast: [urn:grav:<channel.id>] plus optional sub-topic if the
      *              channel metadata advertises one (see
      *              metadata.subscribeSubTopics).
-     *   Awareness: [urn:grav:<channel.id>:awareness]
+     *   Awareness: [urn:grav:<channel.id>] (matches publishAwareness so a
+     *              consumer plugin that registers a separate awareness channel
+     *              and pulls its topic in via a Broadcast subscribeSubTopics
+     *              entry receives the events on the same URI).
      *
      * @return list<string>
      */
@@ -190,7 +197,7 @@ final class MercureTransport implements TransportInterface
                 }
                 return $topics;
             })(),
-            MessageType::Awareness => ['urn:grav:' . $channel->id . ':awareness'],
+            MessageType::Awareness => ['urn:grav:' . $channel->id],
         };
     }
 
