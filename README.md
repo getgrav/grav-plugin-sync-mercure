@@ -377,6 +377,129 @@ with its topic and id. Useful for confirming PHP is reaching the hub.
 
 ---
 
+## As a sync transport
+
+When `grav-plugin-sync` is installed, this plugin auto-registers a
+`MercureTransport` with sync's transport registry on the
+`onSyncRegisterTransports` event. Once registered, any sync channel —
+not just editor-pro's CRDT rooms — can flow through Mercure.
+
+The transport reports:
+
+- **id**: `mercure`
+- **priority**: `50` (configurable)
+- **supportedMessageTypes**: `crdt`, `broadcast`, `awareness`
+
+Sync's facade picks the highest-priority available transport per
+channel. With this plugin enabled and a hub URL configured, broadcast
+and awareness messages from any consumer plugin (comments-pro v3.0+,
+reactions plugins, custom widgets) get Mercure SSE delivery for free —
+the consumer plugin calls `$grav['sync']->publish(...)` and never
+references Mercure directly.
+
+The legacy `onSyncUpdate` / `onSyncAwareness` event subscribers stay in
+place so editor-pro's existing CodeMirror collab path keeps producing
+the same wire output it always did. Both pipelines coexist.
+
+---
+
+## Client SDK (`window.SyncMercure`)
+
+The plugin ships `assets/js/sync-mercure-client.js` and auto-enqueues it
+on every frontend page when `plugins.sync-mercure.enabled` is true.
+Consumer plugins don't bundle their own EventSource subscriber; they
+just call into the global.
+
+```js
+// Initialize the connection. Returns false on incomplete config (the
+// caller should treat that as auto-failover) and true on success.
+window.SyncMercure.init(config, handlers);
+//   config: {
+//     hubUrl: string,
+//     jwt: string,
+//     topics: { main: string, typing?: string },
+//     heartbeatSeconds?: number,
+//     typingPostUrl?: string
+//   }
+//   handlers: { onUpdate, onFailover, onTypingChange? }
+
+// Send a typing-presence event. POSTs to handlers.typingPostUrl with
+// throttling and an automatic heartbeat while 'start' is active.
+// No-op when typingPostUrl is absent.
+window.SyncMercure.sendTyping('start');
+window.SyncMercure.sendTyping('stop');
+
+// Close the EventSource and clear all timers. Safe to call multiple times.
+window.SyncMercure.disconnect();
+```
+
+The server-side `MercureTransport::clientConfig()` returns the
+`hubUrl`, `jwt`, and `topics` keys; consumer plugins fill in
+`typingPostUrl` and `heartbeatSeconds` before passing the merged config
+to `init()`.
+
+---
+
+## Composer
+
+The plugin ships with `vendor/` pre-installed (`firebase/php-jwt`).
+End users do not need to run `composer install` — drop the release
+archive into `user/plugins/sync-mercure/` and it's ready.
+
+---
+
+## Using as a generic Mercure bridge
+
+Once `sync-mercure` is enabled and pointing at a hub, **any Grav plugin**
+can use that same hub as a generic Mercure pub/sub backend. The bridge
+is exposed on the Grav DI container as `$grav['mercure']`:
+
+```php
+use Grav\Plugin\SyncMercure\MercureBridge;
+
+/** @var MercureBridge $mercure */
+$mercure = $this->grav['mercure'];
+
+if (!$mercure->isAvailable()) {
+    return; // hub not configured / disabled, fall back gracefully
+}
+
+// Publish JSON to your own topic. Pass an array and the bridge json_encodes
+// it for you; pass a pre-built string if you want full control of the body.
+$mercure->publishTopic('urn:grav:myplugin:notifications', [
+    'kind'  => 'job-finished',
+    'jobId' => 'abc123',
+    'ok'    => true,
+]);
+
+// Mint a subscriber JWT scoped to the topics your client should see.
+$jwt = $mercure->issueSubscriberJwtForTopics(
+    ['urn:grav:myplugin:notifications', 'urn:grav:myplugin:user:bob'],
+    userId: 'bob',
+    ttlSeconds: 600,
+);
+
+// Hand $jwt + $mercure->publicHubUrl() back to the browser; the browser
+// opens an EventSource against the hub URL with the JWT in a cookie or
+// Authorization header (see Mercure's own docs for client setup).
+```
+
+**Topic-prefix discipline.** Each plugin owns its own URI prefix and is
+responsible for not colliding with other plugins. Sync uses
+`urn:grav:sync:`; pick something specific to your plugin (for example
+`urn:grav:myplugin:`). There is no central registry.
+
+**API version check.** If your plugin needs a feature added in a later
+release of `sync-mercure`, gate on `MercureBridge::API_VERSION`:
+
+```php
+if (MercureBridge::API_VERSION < 1) {
+    throw new RuntimeException('sync-mercure 1.0.1 or newer is required');
+}
+```
+
+---
+
 ## License
 
-MIT — see `LICENSE`.
+MIT (see `LICENSE`).

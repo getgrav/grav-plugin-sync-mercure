@@ -9,23 +9,41 @@ use Grav\Common\Config\Config;
 use RuntimeException;
 
 /**
- * Bridges grav-plugin-sync to a Mercure hub.
+ * Bridges Grav to a Mercure hub.
  *
- *   - publish(roomId, channel, bytes) → POST {topic, data} to the hub
- *   - issueSubscriberJwt(roomId, userId) → signed JWT clients pass to the hub
+ * Two layers of API live on this class:
+ *
+ *   - Sync-specific (kept for backward compatibility):
+ *       publish(roomId, channel, bytes) → POST envelope to the hub
+ *       issueSubscriberJwt(roomId, userId) → JWT for room's doc + aw topics
+ *
+ *   - Generic public API (any Grav plugin can use it):
+ *       publishTopic(topic, payload, private) → POST to an arbitrary topic
+ *       issueSubscriberJwtForTopics(topics, userId, ttl) → JWT for any topics
  *
  * The hub itself runs as a separate process. PHP only sees it via two URLs:
- * the internal one (used for PHP→hub publishes) and the public one (returned
- * to clients to subscribe with EventSource).
+ * the internal one (used for PHP to hub publishes) and the public one
+ * (returned to clients to subscribe with EventSource).
  *
- * Topic structure:
+ * Sync topic structure:
  *   urn:grav:sync:<roomId>:<channel>
  *
- *   channel = 'doc'  — Yjs document updates (binary, base64 in JSON)
- *   channel = 'aw'   — awareness deltas (encodeAwarenessUpdate output)
+ *   channel = 'doc'  (Yjs document updates, binary, base64 in JSON)
+ *   channel = 'aw'   (awareness deltas, encodeAwarenessUpdate output)
+ *
+ * Other plugins should pick their own topic prefix (for example
+ * `urn:grav:myplugin:`) and own that namespace themselves; there is no
+ * central registry.
  */
 final class MercureBridge
 {
+    /**
+     * Public API version. Increment on breaking changes to publishTopic /
+     * issueSubscriberJwtForTopics. Consumers can guard against older
+     * sync-mercure builds with `MercureBridge::API_VERSION >= N`.
+     */
+    public const API_VERSION = 1;
+
     public function __construct(
         private readonly Config $config,
     ) {
@@ -37,9 +55,26 @@ final class MercureBridge
             && $this->publicUrl() !== '';
     }
 
+    /**
+     * Public-API-friendly alias for isEnabled(). Generic consumers should
+     * prefer this name; it reads better outside the sync plugin.
+     */
+    public function isAvailable(): bool
+    {
+        return $this->isEnabled();
+    }
+
     public function publicUrl(): string
     {
         return (string)$this->config->get('plugins.sync-mercure.hub.public_url', '');
+    }
+
+    /**
+     * Public-API-friendly alias for publicUrl().
+     */
+    public function publicHubUrl(): string
+    {
+        return $this->publicUrl();
     }
 
     public function internalUrl(): string
@@ -59,37 +94,146 @@ final class MercureBridge
     }
 
     /**
-     * Publish a binary update to a room channel.
+     * Publish a binary update to a sync room channel.
+     *
+     * Kept for backward compatibility with grav-plugin-sync. The wire output
+     * (envelope JSON, topic, JWT claim shape, HTTP body) is byte-identical
+     * to the original implementation; only the HTTP transport step is shared
+     * with the new generic publishTopic() helper.
      *
      * @param string $bytes Raw binary payload (Yjs update or awareness delta).
      */
     public function publish(string $roomId, string $channel, string $bytes): void
     {
-        $hub = $this->internalUrl();
-        if ($hub === '') {
-            return; // disabled / not configured — silent no-op
-        }
-        $secret = (string)$this->config->get('plugins.sync-mercure.hub.publisher_secret', '');
-        if ($secret === '') {
-            throw new RuntimeException('sync-mercure: publisher_secret is not configured');
+        if ($this->internalUrl() === '') {
+            return; // disabled / not configured (silent no-op)
         }
 
         $topic = $this->topicFor($roomId, $channel);
-        $jwt = $this->signPublisherJwt($secret, [$topic]);
 
-        // Mercure expects application/x-www-form-urlencoded with topic + data fields.
-        // Wrap binary payload as base64 inside a small JSON envelope so subscribers
-        // get a uniform shape (channel + clientId + bytes).
+        // Wrap binary payload as base64 inside a small JSON envelope so
+        // subscribers get a uniform shape (channel + bytes + serverTimeMs).
         $envelope = json_encode([
             'channel' => $channel,
             'bytes' => base64_encode($bytes),
             'serverTimeMs' => (int)(microtime(true) * 1000),
         ], JSON_UNESCAPED_SLASHES);
 
-        $body = http_build_query([
+        $this->httpPostToHub($topic, $envelope, false);
+    }
+
+    /**
+     * Generic publish to an arbitrary Mercure topic. Any Grav plugin can
+     * call this through `$grav['mercure']` to use the configured hub as a
+     * generic pub/sub backend.
+     *
+     * Each plugin owns its own topic prefix (for example
+     * `urn:grav:myplugin:`); there is no central registry. Pick something
+     * specific enough not to clash with other plugins.
+     *
+     * @param string       $topic   The Mercure topic URI to publish on.
+     * @param array|string $payload If array, json_encoded. If string, sent
+     *                              through unchanged (lets binary callers
+     *                              control their own envelope).
+     * @param bool         $private If true, sets Mercure's standard
+     *                              `private[]=on` flag so only authorized
+     *                              subscribers see the update.
+     */
+    public function publishTopic(string $topic, array|string $payload, bool $private = false): void
+    {
+        if ($this->internalUrl() === '') {
+            return; // disabled / not configured (silent no-op)
+        }
+
+        $data = is_array($payload)
+            ? (string)json_encode($payload, JSON_UNESCAPED_SLASHES)
+            : $payload;
+
+        $this->httpPostToHub($topic, $data, $private);
+    }
+
+    /**
+     * Issue a subscriber JWT scoped to a single sync room (doc + awareness
+     * channels). Kept for backward compatibility; new code should prefer
+     * issueSubscriberJwtForTopics().
+     *
+     * The hub validates the `mercure.subscribe` claim against the topic the
+     * client requests on EventSource connect, so peer leakage between
+     * unrelated rooms is impossible.
+     */
+    public function issueSubscriberJwt(string $roomId, string $userId): string
+    {
+        return $this->issueSubscriberJwtForTopics(
+            [
+                $this->topicFor($roomId, 'doc'),
+                $this->topicFor($roomId, 'aw'),
+            ],
+            $userId,
+        );
+    }
+
+    /**
+     * Issue a subscriber JWT for an arbitrary list of topics. Generic
+     * plugins should call this directly with the topic(s) they want their
+     * client to subscribe to.
+     *
+     * @param array<int, string> $topics  Topics the client may subscribe to.
+     * @param string             $userId  Goes in the `sub` claim.
+     * @param int|null           $ttlSeconds Optional TTL override; falls
+     *                                       back to the plugin's
+     *                                       `token_ttl_seconds` config.
+     */
+    public function issueSubscriberJwtForTopics(array $topics, string $userId, ?int $ttlSeconds = null): string
+    {
+        $secret = (string)$this->config->get('plugins.sync-mercure.hub.subscriber_secret', '');
+        if ($secret === '') {
+            throw new RuntimeException('sync-mercure: subscriber_secret is not configured');
+        }
+        $configTtl = (int)$this->config->get('plugins.sync-mercure.token_ttl_seconds', 600);
+        $ttl = $ttlSeconds ?? $configTtl;
+        $now = time();
+
+        $payload = [
+            'iat' => $now,
+            'exp' => $now + max(60, $ttl),
+            'sub' => $userId,
+            'mercure' => [
+                'subscribe' => array_values($topics),
+            ],
+        ];
+
+        return JWT::encode($payload, $secret, 'HS256');
+    }
+
+    /**
+     * Shared HTTP POST helper used by both publish() and publishTopic().
+     * Mints a short-lived publisher JWT scoped to the single topic and
+     * sends the form-encoded body Mercure expects.
+     */
+    private function httpPostToHub(string $topic, string $data, bool $private): void
+    {
+        $hub = $this->internalUrl();
+        if ($hub === '') {
+            return;
+        }
+        $secret = (string)$this->config->get('plugins.sync-mercure.hub.publisher_secret', '');
+        if ($secret === '') {
+            throw new RuntimeException('sync-mercure: publisher_secret is not configured');
+        }
+
+        $jwt = $this->signPublisherJwt($secret, [$topic]);
+
+        $fields = [
             'topic' => $topic,
-            'data' => $envelope,
-        ]);
+            'data' => $data,
+        ];
+        $body = http_build_query($fields);
+        if ($private) {
+            // Mercure's private flag is its own form field; http_build_query
+            // would index `private[]` and the hub wouldn't recognize it,
+            // so append it manually as Mercure expects.
+            $body .= '&private[]=on';
+        }
 
         $ctx = stream_context_create([
             'http' => [
@@ -112,42 +256,8 @@ final class MercureBridge
     }
 
     /**
-     * Issue a subscriber JWT scoped to a single room (doc + awareness channels).
-     *
-     * The hub validates the `mercure.subscribe` claim against the topic the
-     * client is requesting on EventSource connect — peers can only subscribe
-     * to the rooms PHP has authorized for them, so peer leakage between
-     * unrelated pages is impossible.
-     */
-    public function issueSubscriberJwt(string $roomId, string $userId): string
-    {
-        $secret = (string)$this->config->get('plugins.sync-mercure.hub.subscriber_secret', '');
-        if ($secret === '') {
-            throw new RuntimeException('sync-mercure: subscriber_secret is not configured');
-        }
-        $ttl = (int)$this->config->get('plugins.sync-mercure.token_ttl_seconds', 600);
-        $now = time();
-
-        $topics = [
-            $this->topicFor($roomId, 'doc'),
-            $this->topicFor($roomId, 'aw'),
-        ];
-
-        $payload = [
-            'iat' => $now,
-            'exp' => $now + max(60, $ttl),
-            'sub' => $userId,
-            'mercure' => [
-                'subscribe' => $topics,
-            ],
-        ];
-
-        return JWT::encode($payload, $secret, 'HS256');
-    }
-
-    /**
      * Generate a one-shot publisher JWT scoped to a topic. Held in memory
-     * only — never returned to clients.
+     * only, never returned to clients.
      *
      * @param array<int, string> $topics
      */
