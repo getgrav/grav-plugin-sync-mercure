@@ -304,14 +304,10 @@ existing values.
 
 ## Permissions
 
-The plugin adds one new permission:
-
-- `api.collab.mercure.issue` — required to call `POST /sync/mercure/token`.
-
-In practice users who already have `api.collab.read` (the perm sync's
-`/sync/pages/.../pull` checks) get this for free via Grav's parent-key
-inheritance, since the controller also requires `api.collab.read` and
-`api.pages.read` on the room being subscribed to.
+`POST /sync/mercure/token` is gated by `api.pages.read` on the room being
+subscribed to — same as the underlying sync pull endpoint. Anyone who can
+read the page can subscribe to its Mercure stream; no separate mercure
+permission needs to be granted.
 
 ---
 
