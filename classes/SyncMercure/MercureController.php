@@ -29,11 +29,8 @@ use Psr\Http\Message\ServerRequestInterface;
  */
 class MercureController extends AbstractApiController
 {
-    private const PERMISSION_READ = 'api.collab.read';
-
     public function token(ServerRequestInterface $request): ResponseInterface
     {
-        $this->requirePermission($request, self::PERMISSION_READ);
         $this->requirePermission($request, 'api.pages.read');
 
         /** @var MercureBridge $bridge */

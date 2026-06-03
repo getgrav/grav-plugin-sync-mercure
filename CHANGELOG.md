@@ -1,3 +1,9 @@
+# v1.1.2
+## 05/28/2026
+
+1. [](#improved)
+    * **`POST /sync/mercure/token` is now gated by regular page permissions** (`api.pages.read`) instead of the separate `api.collab.*` permission, matching the change in the sync plugin. Fixes [getgrav/grav-plugin-admin2#24](https://github.com/getgrav/grav-plugin-admin2/issues/24).
+
 # v1.1.1
 ## 05/18/2026
 

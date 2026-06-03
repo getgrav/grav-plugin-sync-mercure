@@ -6,8 +6,6 @@ namespace Grav\Plugin;
 
 use Composer\Autoload\ClassLoader;
 use Grav\Common\Plugin;
-use Grav\Events\PermissionsRegisterEvent;
-use Grav\Framework\Acl\PermissionsReader;
 use Grav\Plugin\Sync\Transport\TransportRegistry;
 use Grav\Plugin\SyncMercure\MercureBridge;
 use Grav\Plugin\SyncMercure\MercureController;
@@ -48,7 +46,6 @@ class SyncMercurePlugin extends Plugin
             'onSyncUpdate'                => ['onSyncUpdate', 0],
             'onSyncAwareness'             => ['onSyncAwareness', 0],
             'onSyncCapabilities'          => ['onSyncCapabilities', 0],
-            PermissionsRegisterEvent::class => ['onRegisterPermissions', 1000],
         ];
     }
 
@@ -206,12 +203,6 @@ class SyncMercurePlugin extends Plugin
             'topic_prefix' => $bridge->topicPrefix(),
         ];
         $event['capabilities'] = $caps;
-    }
-
-    public function onRegisterPermissions(PermissionsRegisterEvent $event): void
-    {
-        $actions = PermissionsReader::fromYaml("plugin://{$this->name}/permissions.yaml");
-        $event->permissions->addActions($actions);
     }
 
     private function bridge(): ?MercureBridge
