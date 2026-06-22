@@ -79,7 +79,16 @@ class StartCommand extends MercureCommandBase
             return 1;
         }
 
-        $caddyConf = $this->writeCaddyfile($certInfo['cert'], $certInfo['key']);
+        // Prefer the configured port, but step up if it's already taken so
+        // a second Grav site on this host doesn't collide on 3001. Persist
+        // the choice into public_url so the browser and PHP both follow.
+        $preferred = $this->configuredPort();
+        $port = $this->resolvePort($preferred);
+        if ($port !== $preferred) {
+            $this->persistPublicUrlPort($port);
+            $io->note("Port {$preferred} is busy — hub moving to {$port} (public_url updated).");
+        }
+        $caddyConf = $this->writeCaddyfile($certInfo['cert'], $certInfo['key'], $port);
         $logFile = $this->logFile();
 
         $env = [
@@ -120,10 +129,22 @@ class StartCommand extends MercureCommandBase
             $io->error('Process exited immediately. See ' . $logFile);
             return 1;
         }
+        // Report the port we actually bound. The in-memory config still
+        // holds the pre-resolution value (the cache bust only helps the next
+        // process), so swap the resolved port into the configured URL.
         $publicUrl = (string)\Grav\Common\Grav::instance()['config']->get(
             'plugins.sync-mercure.hub.public_url',
             'https://localhost:3001/.well-known/mercure'
         );
+        $configuredPortInUrl = (int)parse_url($publicUrl, PHP_URL_PORT);
+        if ($configuredPortInUrl > 0 && $configuredPortInUrl !== $port) {
+            $publicUrl = preg_replace(
+                '#:' . $configuredPortInUrl . '(/|$)#',
+                ':' . $port . '$1',
+                $publicUrl,
+                1
+            ) ?? $publicUrl;
+        }
         $io->success("Started Mercure (pid {$pid}) at {$publicUrl}");
         $io->writeln('Hard-reload admin2 to pick up the new transport.');
         return 0;

@@ -81,6 +81,12 @@ The bundled CLI also covers:
 | `bin/plugin sync-mercure stop` | Send SIGTERM to the hub |
 | `bin/plugin sync-mercure status` | Report pid + alive status |
 | `bin/plugin sync-mercure logs` | Tail the most recent hub log |
+| `bin/plugin sync-mercure enable` | Install an autostart service (systemd/launchd) so the hub starts on boot |
+| `bin/plugin sync-mercure disable` | Remove the autostart service |
+
+`start` and `enable` prefer the configured port but step up from it when
+it's already taken (so a second Grav site on the same host doesn't collide
+on 3001), and write the chosen port back into `hub.public_url`.
 
 The CLI manages everything inside `user/data/sync-mercure/`:
 
@@ -89,7 +95,8 @@ user/data/sync-mercure/
 ├── mercure          # binary
 ├── mercure.pid
 ├── mercure.log
-├── Caddyfile        # rewritten on each `start`
+├── Caddyfile        # rewritten on each `start` (admin off, explicit transport)
+├── mercure.db       # bolt history store (message replay on reconnect)
 ├── cert.pem         # TLS cert + key
 └── key.pem
 ```
@@ -133,6 +140,39 @@ token_ttl_seconds: 600
 
 The plugin generates fresh secrets on first install for local dev.
 For production, **regenerate these values** (`openssl rand -hex 32`).
+
+### Autostart on reboot (`enable`)
+
+For a single-host setup (one Grav site owning the hub), the quickest way
+to survive reboots is to let the plugin install the service for you:
+
+```bash
+bin/plugin sync-mercure install   # if you haven't already
+bin/plugin sync-mercure enable     # writes + starts the autostart service
+```
+
+`enable` detects the host's service manager and does the right thing:
+
+- **Linux, normal user** — writes a systemd **user** unit to
+  `~/.config/systemd/user/grav-mercure.service`, runs
+  `systemctl --user enable --now`, and tries `loginctl enable-linger` so
+  the hub also starts at boot when no one is logged in. If linger needs
+  privileges it prints the one `sudo loginctl enable-linger <user>` to run.
+- **Linux, root** — writes a system unit to
+  `/etc/systemd/system/grav-mercure.service` (running mercure as the data
+  dir's owner when that's a normal user) and `systemctl enable --now`s it.
+- **macOS** — writes a launchd agent to
+  `~/Library/LaunchAgents/org.getgrav.mercure.plist` with `RunAtLoad` +
+  `KeepAlive` and bootstraps it.
+
+The service runs the bundled `mercure` binary directly (no PHP/Grav
+bootstrap) with the JWT secrets from your config baked in as env vars, so
+the manager owns the process and restarts it on crash. `disable` reverses
+all of the above. Because the manager keeps the hub alive, use `disable`
+(not `stop`) to take it down once enabled.
+
+For multi-host or container deployments, prefer a hand-managed unit as
+below.
 
 ### Running the bundled binary as a system service
 
