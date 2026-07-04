@@ -1,3 +1,13 @@
+# v1.2.0
+## 07/04/2026
+
+1. [](#new)
+    * **`bin/plugin sync-mercure enable` / `disable`** — install (or remove) an OS-native autostart service so the hub comes back on reboot. Detects the host's service manager automatically: a systemd user unit (+ linger) or system unit on Linux, or a launchd agent on macOS. The service runs the bundled `mercure` binary directly so the manager owns the process and restarts it on crash.
+    * **Automatic port-conflict resolution** — `start` and `enable` now prefer the configured port but step up from it when it's already taken (e.g. a second Grav site on the same host), and persist the chosen port into `hub.public_url` so the browser and PHP publisher both follow.
+2. [](#bugfix)
+    * **Fixed startup crash on Mercure 0.24+** (`invalid transport`). Mercure 0.24 dropped the implicit default transport, so the generated Caddyfile now sets the transport explicitly with `transport local`. (The bolt store was tried for `Last-Event-ID` replay but the bolt module in Mercure 0.24.2 aborts provisioning with `invalid transport: timeout`, so it is unusable on that build; clients resync through the API on reconnect instead.)
+    * The generated Caddyfile now disables Caddy's admin API (`admin off`). The hub never used it, and leaving it on (default `:2019`) was a second collision point preventing two hubs from running on one host even after the data port was bumped.
+
 # v1.1.2
 ## 05/28/2026
 

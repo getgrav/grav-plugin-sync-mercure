@@ -16,6 +16,12 @@ abstract class MercureCommandBase extends ConsoleCommand
 {
     protected const MERCURE_VERSION = '0.20.0';
 
+    /** systemd unit basename (becomes grav-mercure.service). */
+    protected const SERVICE_NAME = 'grav-mercure';
+
+    /** launchd job label (reverse-DNS, becomes the plist filename). */
+    protected const LAUNCHD_LABEL = 'org.getgrav.mercure';
+
     protected function getDataDir(): string
     {
         $base = (string)\Grav\Common\Grav::instance()['locator']->findResource('user-data://', true);
@@ -62,6 +68,137 @@ abstract class MercureCommandBase extends ConsoleCommand
     protected function caddyfilePath(): string
     {
         return $this->getDataDir() . '/Caddyfile';
+    }
+
+    /**
+     * Port the hub should prefer: whatever sits in the configured
+     * public_url, else 3001. resolvePort() walks up from here when it's
+     * already taken (e.g. a second Grav site on the same host).
+     */
+    protected function configuredPort(): int
+    {
+        $url = (string)\Grav\Common\Grav::instance()['config']->get(
+            'plugins.sync-mercure.hub.public_url',
+            ''
+        );
+        $port = $url !== '' ? (int)parse_url($url, PHP_URL_PORT) : 0;
+        return $port > 0 ? $port : 3001;
+    }
+
+    /**
+     * True if nothing is bound to $port. Tests a bind on 0.0.0.0 to match
+     * how Caddy's ":<port>" listener grabs all interfaces — so the answer
+     * lines up with what the hub will actually attempt.
+     */
+    protected function portIsFree(int $port): bool
+    {
+        $errno = 0;
+        $errstr = '';
+        $sock = @stream_socket_server("tcp://0.0.0.0:{$port}", $errno, $errstr);
+        if ($sock === false) {
+            return false;
+        }
+        fclose($sock);
+        return true;
+    }
+
+    /**
+     * Return the first free port at or above $preferred, so two sites on
+     * one host don't both fight over 3001. Gives up after $tries and
+     * returns $preferred (let the hub surface the real bind error).
+     */
+    protected function resolvePort(int $preferred, int $tries = 20): int
+    {
+        for ($p = $preferred; $p < $preferred + $tries; $p++) {
+            if ($this->portIsFree($p)) {
+                return $p;
+            }
+        }
+        return $preferred;
+    }
+
+    /**
+     * Rewrite the :port segment of hub.public_url in the user override so
+     * the browser (clientConfig) and the PHP publisher (internalUrl falls
+     * back to publicUrl) both target the port the hub actually bound.
+     * Returns the new URL, or null when no change was needed/possible.
+     */
+    protected function persistPublicUrlPort(int $port): ?string
+    {
+        $path = $this->userConfigPath();
+        if (!is_file($path)) {
+            return null;
+        }
+        try {
+            $parsed = \Symfony\Component\Yaml\Yaml::parseFile($path);
+        } catch (\Throwable) {
+            return null;
+        }
+        if (!is_array($parsed)) {
+            return null;
+        }
+        $url = (string)($parsed['hub']['public_url'] ?? '');
+        $current = $url !== '' ? (int)parse_url($url, PHP_URL_PORT) : 0;
+        // Only safe to swap when the URL carries an explicit port already.
+        if ($url === '' || $current <= 0 || $current === $port) {
+            return null;
+        }
+        $new = preg_replace('#:' . $current . '(/|$)#', ':' . $port . '$1', $url, 1);
+        if (!is_string($new) || $new === $url) {
+            return null;
+        }
+        $parsed['hub']['public_url'] = $new;
+        $yaml = \Symfony\Component\Yaml\Yaml::dump($parsed, 4, 2);
+        $header = "# grav-plugin-sync-mercure overrides\n"
+            . "# Generated/updated by `bin/plugin sync-mercure install`. Edit freely;\n"
+            . "# values you set here override the plugin's bundled sync-mercure.yaml.\n\n";
+        file_put_contents($path, $header . $yaml);
+        $this->bustConfigCache();
+        return $new;
+    }
+
+    /**
+     * Which service manager autostart should target on this host.
+     * Returns 'launchd' (macOS), 'systemd-system' (Linux as root),
+     * 'systemd-user' (Linux as a normal user), or 'unsupported'.
+     */
+    protected function serviceManager(): string
+    {
+        if (PHP_OS_FAMILY === 'Darwin') {
+            return $this->commandExists('launchctl') ? 'launchd' : 'unsupported';
+        }
+        if (PHP_OS_FAMILY === 'Linux' && $this->commandExists('systemctl')) {
+            $isRoot = function_exists('posix_getuid') && posix_getuid() === 0;
+            return $isRoot ? 'systemd-system' : 'systemd-user';
+        }
+        return 'unsupported';
+    }
+
+    protected function homeDir(): string
+    {
+        return rtrim((string)($_SERVER['HOME'] ?? getenv('HOME') ?: ''), '/');
+    }
+
+    protected function launchdPlistPath(): string
+    {
+        return $this->homeDir() . '/Library/LaunchAgents/' . self::LAUNCHD_LABEL . '.plist';
+    }
+
+    protected function systemdUserUnitPath(): string
+    {
+        return $this->homeDir() . '/.config/systemd/user/' . self::SERVICE_NAME . '.service';
+    }
+
+    protected function systemdSystemUnitPath(): string
+    {
+        return '/etc/systemd/system/' . self::SERVICE_NAME . '.service';
+    }
+
+    protected function runShell(string $cmd): int
+    {
+        $rc = 0;
+        passthru($cmd, $rc);
+        return $rc;
     }
 
     protected function certPath(): string
@@ -134,7 +271,7 @@ abstract class MercureCommandBase extends ConsoleCommand
         return ['cert' => $cert, 'key' => $key, 'tool' => 'openssl'];
     }
 
-    private function commandExists(string $cmd): bool
+    protected function commandExists(string $cmd): bool
     {
         $out = [];
         $rc = 0;
@@ -143,21 +280,35 @@ abstract class MercureCommandBase extends ConsoleCommand
     }
 
     /**
-     * Write a Caddyfile that runs the embedded Mercure module on :3001
+     * Write a Caddyfile that runs the embedded Mercure module on $port
      * with HTTPS using a cert pair from $this->ensureCert().
+     *
+     * `admin off` disables Caddy's admin API (default :2019). The hub never
+     * uses it, and leaving it on means a second Grav site on the same host
+     * collides on 2019 even after the data port has been bumped.
+     *
+     * `transport` is set explicitly because Mercure 0.24 dropped the implicit
+     * default transport — without it the hub aborts at startup with "invalid
+     * transport". We use `local` (in-memory) rather than bolt: the bolt module
+     * shipped in Mercure 0.24.2 aborts provisioning with "invalid transport:
+     * timeout" even with the modern `transport bolt { path … }` block, so it is
+     * unusable on this build. The tradeoff is no on-disk Last-Event-ID replay;
+     * collaborative clients resync through the API on reconnect anyway.
      */
-    protected function writeCaddyfile(string $certFile, string $keyFile): string
+    protected function writeCaddyfile(string $certFile, string $keyFile, int $port = 3001): string
     {
         $confPath = $this->caddyfilePath();
         $conf = '{
     auto_https off
+    admin off
 }
 
-:3001 {
+:' . $port . ' {
     tls ' . $certFile . ' ' . $keyFile . '
     encode zstd gzip
 
     mercure {
+        transport local
         publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
         subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
         cors_origins *
@@ -287,15 +438,22 @@ abstract class MercureCommandBase extends ConsoleCommand
             . "# values you set here override the plugin's bundled sync-mercure.yaml.\n\n";
         file_put_contents($path, $header . $yaml);
 
-        // Bust Grav's compiled config cache so the new values are visible
-        // to subsequent commands in the same shell session.
+        $this->bustConfigCache();
+
+        return ['path' => $path, 'changes' => $changes, 'hub' => $hub];
+    }
+
+    /**
+     * Bust Grav's compiled config cache so freshly-written override values
+     * are visible to subsequent commands in the same shell session.
+     */
+    protected function bustConfigCache(): void
+    {
         $cacheDir = (string)\Grav\Common\Grav::instance()['locator']->findResource('cache://compiled', true);
         if ($cacheDir !== '' && is_dir($cacheDir)) {
             foreach (glob($cacheDir . '/config/*.php') ?: [] as $f) {
                 @unlink($f);
             }
         }
-
-        return ['path' => $path, 'changes' => $changes, 'hub' => $hub];
     }
 }
