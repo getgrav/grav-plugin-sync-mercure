@@ -1,5 +1,5 @@
 # v1.2.0
-## 07/03/2026
+## 07/04/2026
 
 1. [](#new)
     * **`bin/plugin sync-mercure enable` / `disable`** — install (or remove) an OS-native autostart service so the hub comes back on reboot. Detects the host's service manager automatically: a systemd user unit (+ linger) or system unit on Linux, or a launchd agent on macOS. The service runs the bundled `mercure` binary directly so the manager owns the process and restarts it on crash.
