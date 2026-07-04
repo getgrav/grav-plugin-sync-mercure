@@ -287,12 +287,13 @@ abstract class MercureCommandBase extends ConsoleCommand
      * uses it, and leaving it on means a second Grav site on the same host
      * collides on 2019 even after the data port has been bumped.
      *
-     * `transport_url` is set explicitly because Mercure 0.24 dropped the
-     * implicit default transport — without it the hub aborts at startup with
-     * "invalid transport". bolt:// keeps an on-disk history so reconnecting
-     * clients can replay missed updates via Last-Event-ID; the path is
-     * relative to the data dir, which is the working dir for every launch
-     * path (start, systemd, launchd).
+     * `transport` is set explicitly because Mercure 0.24 dropped the implicit
+     * default transport — without it the hub aborts at startup with "invalid
+     * transport". We use `local` (in-memory) rather than bolt: the bolt module
+     * shipped in Mercure 0.24.2 aborts provisioning with "invalid transport:
+     * timeout" even with the modern `transport bolt { path … }` block, so it is
+     * unusable on this build. The tradeoff is no on-disk Last-Event-ID replay;
+     * collaborative clients resync through the API on reconnect anyway.
      */
     protected function writeCaddyfile(string $certFile, string $keyFile, int $port = 3001): string
     {
@@ -307,7 +308,7 @@ abstract class MercureCommandBase extends ConsoleCommand
     encode zstd gzip
 
     mercure {
-        transport_url bolt://mercure.db
+        transport local
         publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
         subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
         cors_origins *
