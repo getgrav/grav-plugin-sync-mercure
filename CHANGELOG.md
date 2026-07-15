@@ -1,3 +1,9 @@
+# v1.2.1
+## 07/15/2026
+
+1. [](#bugfix)
+    * **Fixed every publish to a loopback hub failing TLS verification.** When `hub.internal_url` points at the hub over HTTPS on `127.0.0.1` / `::1` / `localhost` (the normal self-signed local-hub setup), PHP's default `verify_peer` rejected the hub's self-signed certificate, so every event silently failed to publish. The publisher now skips certificate verification for a loopback internal URL only (there is no man-in-the-middle surface on loopback); a non-loopback `internal_url` keeps full verification. Set `hub.internal_tls_insecure: true` or `false` to override the auto-detection. A failed publish now also reports the underlying TLS or connection reason instead of a bare "publish failed".
+
 # v1.2.0
 ## 07/04/2026
 

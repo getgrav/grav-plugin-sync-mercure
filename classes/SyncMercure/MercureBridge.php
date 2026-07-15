@@ -247,12 +247,57 @@ final class MercureBridge
                 'timeout' => 5,
                 'ignore_errors' => true,
             ],
+            'ssl' => $this->sslOptionsFor($hub),
         ]);
         $resp = @file_get_contents($hub, false, $ctx);
         if ($resp === false) {
-            throw new RuntimeException("sync-mercure: publish to {$hub} failed");
+            // ignore_errors keeps HTTP error bodies, so a false here is a
+            // transport failure (DNS, connect, TLS). Surface the underlying
+            // reason instead of a bare "failed" — a self-signed loopback cert
+            // rejected by verify_peer was the classic silent culprit.
+            $err = error_get_last();
+            $detail = isset($err['message']) ? ': ' . trim((string)$err['message']) : '';
+            throw new RuntimeException("sync-mercure: publish to {$hub} failed{$detail}");
         }
         // Mercure returns 200 with the event id. We don't need it.
+    }
+
+    /**
+     * TLS options for the publish request. The internal hub normally listens
+     * on loopback with a self-signed certificate (Caddy's local cert), which
+     * PHP's default verify_peer rejects — the publish then fails on every
+     * event. For a loopback hub we skip verification (there is no MITM surface
+     * on 127.0.0.0/8 or ::1); a non-loopback internal_url keeps full
+     * verification. Set `hub.internal_tls_insecure: true|false` to override the
+     * auto-detection either way. No-op for plain-HTTP hubs.
+     *
+     * @return array<string, mixed>
+     */
+    private function sslOptionsFor(string $hub): array
+    {
+        if (stripos($hub, 'https://') !== 0) {
+            return [];
+        }
+
+        $override = $this->config->get('plugins.sync-mercure.hub.internal_tls_insecure');
+        $insecure = $override !== null ? (bool)$override : $this->isLoopbackUrl($hub);
+        if (!$insecure) {
+            return [];
+        }
+
+        return [
+            'verify_peer' => false,
+            'verify_peer_name' => false,
+            'allow_self_signed' => true,
+        ];
+    }
+
+    /** Whether the URL's host is a loopback address (127.0.0.0/8, ::1, localhost). */
+    private function isLoopbackUrl(string $url): bool
+    {
+        $host = trim((string)parse_url($url, PHP_URL_HOST), '[]');
+
+        return $host === 'localhost' || $host === '::1' || str_starts_with($host, '127.');
     }
 
     /**
