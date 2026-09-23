@@ -96,10 +96,12 @@ final class MercureBridge
     /**
      * Publish a binary update to a sync room channel.
      *
-     * Kept for backward compatibility with grav-plugin-sync. The wire output
-     * (envelope JSON, topic, JWT claim shape, HTTP body) is byte-identical
-     * to the original implementation; only the HTTP transport step is shared
-     * with the new generic publishTopic() helper.
+     * Kept for backward compatibility with grav-plugin-sync. The envelope
+     * JSON, topic and JWT claim shape match the original implementation.
+     * The update is published private: room content (page drafts being
+     * edited) must only reach subscribers whose JWT names the room's topic,
+     * which the token endpoint issues after checking page access. A public
+     * update would go to anyone who guessed the topic.
      *
      * @param string $bytes Raw binary payload (Yjs update or awareness delta).
      */
@@ -119,7 +121,7 @@ final class MercureBridge
             'serverTimeMs' => (int)(microtime(true) * 1000),
         ], JSON_UNESCAPED_SLASHES);
 
-        $this->httpPostToHub($topic, $envelope, false);
+        $this->httpPostToHub($topic, $envelope, true);
     }
 
     /**
@@ -136,8 +138,11 @@ final class MercureBridge
      *                              through unchanged (lets binary callers
      *                              control their own envelope).
      * @param bool         $private If true, sets Mercure's standard
-     *                              `private[]=on` flag so only authorized
-     *                              subscribers see the update.
+     *                              `private[]=on` flag so only subscribers
+     *                              whose JWT names the topic see the update.
+     *                              A public update reaches anyone who knows
+     *                              or guesses the topic, JWT or not, so pass
+     *                              true for anything that isn't public.
      */
     public function publishTopic(string $topic, array|string $payload, bool $private = false): void
     {
@@ -227,13 +232,13 @@ final class MercureBridge
             'topic' => $topic,
             'data' => $data,
         ];
-        $body = http_build_query($fields);
         if ($private) {
-            // Mercure's private flag is its own form field; http_build_query
-            // would index `private[]` and the hub wouldn't recognize it,
-            // so append it manually as Mercure expects.
-            $body .= '&private[]=on';
+            // Mercure reads a plain `private` form field. The `private[]=on`
+            // this used to send is a different key, so the hub ignored it and
+            // published every "private" update publicly.
+            $fields['private'] = 'on';
         }
+        $body = http_build_query($fields);
 
         $ctx = stream_context_create([
             'http' => [

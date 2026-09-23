@@ -294,6 +294,11 @@ abstract class MercureCommandBase extends ConsoleCommand
      * timeout" even with the modern `transport bolt { path … }` block, so it is
      * unusable on this build. The tradeoff is no on-disk Last-Event-ID replay;
      * collaborative clients resync through the API on reconnect anyway.
+     *
+     * No `anonymous`: every Grav client subscribes with a JWT, and sync
+     * updates are published private, so a connection without one has
+     * nothing to receive. `cors_origins *` stays, since subscribers
+     * authenticate with the JWT in the query string, not with cookies.
      */
     protected function writeCaddyfile(string $certFile, string $keyFile, int $port = 3001): string
     {
@@ -312,7 +317,6 @@ abstract class MercureCommandBase extends ConsoleCommand
         publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
         subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
         cors_origins *
-        anonymous
     }
 
     respond /healthz 200
