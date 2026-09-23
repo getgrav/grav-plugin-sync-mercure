@@ -212,7 +212,6 @@ hub.example.com {
         publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
         subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
         cors_origins https://your-grav-site.example.com
-        anonymous
     }
 
     respond /healthz 200
@@ -400,11 +399,9 @@ with its topic and id. Useful for confirming PHP is reaching the hub.
   convenience. **Tighten this in production** by editing your hub's
   Caddyfile to list only the admin-next origins that should subscribe.
 
-- **JWT scoping**: subscriber JWTs issued to clients carry a `mercure.subscribe`
-  claim with **only** the doc + awareness topic for the requested room.
-  A user cannot subscribe to a different room's topic with the same
-  token, and they can't publish (the hub validates the `publish` claim
-  separately and PHP never issues that to clients).
+- **JWT scoping**: every sync update (document edits, awareness, and every channel broadcast) is published as a private Mercure update, and subscriber JWTs carry a `mercure.subscribe` claim naming only the topics of the room or channel the user was admitted to. The hub delivers a private update only to subscribers whose JWT names its topic, so a user can't read another room or channel with their token, and nobody can read anything without one. Clients can't publish either: the hub checks the `publish` claim separately, and PHP never issues it to clients.
+
+- **Anonymous subscribers**: hub configs generated before 1.2.2 carry `anonymous`, and every update was public, so anyone who knew or guessed a topic could listen in. Updating the plugin makes the updates private straight away. Restart the bundled hub (`bin/plugin sync-mercure stop` then `start`, or `disable` then `enable` for the autostart service) to regenerate its Caddyfile without `anonymous`. A hub you run yourself needs the line removed by hand.
 
 - **Network exposure**: the hub on `localhost:3001` is only reachable
   from the same machine. For production, run the hub on a private
@@ -502,11 +499,14 @@ if (!$mercure->isAvailable()) {
 
 // Publish JSON to your own topic. Pass an array and the bridge json_encodes
 // it for you; pass a pre-built string if you want full control of the body.
+// The third argument makes the update private: only subscribers whose JWT
+// names the topic receive it. Leave it false only for data anyone may see,
+// since a public update reaches whoever subscribes to the topic.
 $mercure->publishTopic('urn:grav:myplugin:notifications', [
     'kind'  => 'job-finished',
     'jobId' => 'abc123',
     'ok'    => true,
-]);
+], true);
 
 // Mint a subscriber JWT scoped to the topics your client should see.
 $jwt = $mercure->issueSubscriberJwtForTopics(

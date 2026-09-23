@@ -1,3 +1,13 @@
+# v1.2.2
+## 09/23/2026
+
+1. [](#bugfix)
+    * **Sync updates are now private, so only admitted subscribers receive them.** Every document edit, awareness update and channel broadcast used to go to the hub as a public Mercure update, and a public update reaches anyone subscribed to its topic, with or without a JWT. Topics are predictable (`urn:grav:sync:<room>:doc`, `urn:grav:forum-pro:user/42`), so anyone who guessed one could read live page edits, a member's notification channel, or new posts in a restricted forum, whatever the channel's access check said. Updates are now published private, and the hub only delivers them to subscribers whose JWT names the topic, which PHP issues only after the room or channel admits the user
+    * **Fixed `publishTopic(..., private: true)` publishing publicly.** The bridge sent Mercure's private flag as `private[]=on`, a field name the hub doesn't read, so every update asked to be private went out public. It now sends `private=on`
+    * The generated hub config no longer allows anonymous subscribers. Every Grav client subscribes with a JWT, so a connection without one now gets a 401 instead of an open stream. Restart the bundled hub (`stop` then `start`, or `disable` then `enable`) to regenerate its Caddyfile; a hub you run yourself needs `anonymous` removed by hand
+2. [](#improved)
+    * New `tests/hub-privacy-check.php` runs the privacy checks against a real hub binary: anonymous subscribers get nothing, and one user's or room's JWT can't read another's updates
+
 # v1.2.1
 ## 07/15/2026
 
