@@ -24,6 +24,13 @@ use Grav\Plugin\Sync\Transport\TransportInterface;
  * in sync-mercure.php for the editor-pro CodeMirror collab path. Both
  * pipelines run side-by-side this round; future rounds may collapse the
  * legacy subscribers once editor-pro switches to the facade.
+ *
+ * Every channel publishes private. Mercure hands a public update to any
+ * subscriber of the topic, JWT or not, so a public publish would bypass the
+ * channel's authCallback entirely. Clients get their config (and JWT) only
+ * after the channel admits them, and the JWT names exactly the channel's
+ * topics. Channels with no authCallback are private too: their subscribers
+ * get a JWT all the same, so nothing is lost.
  */
 final class MercureTransport implements TransportInterface
 {
@@ -143,7 +150,7 @@ final class MercureTransport implements TransportInterface
             'event' => $message->eventName,
             'data' => $message->payload,
             'ts' => $message->timestamp,
-        ]);
+        ], true);
     }
 
     private function publishAwareness(Channel $channel, AwarenessMessage $message): void
@@ -156,7 +163,7 @@ final class MercureTransport implements TransportInterface
         $topic = 'urn:grav:' . $channel->id;
         $envelope = $message->payload;
         $envelope['sourceClientId'] = $message->sourceClientId;
-        $this->bridge->publishTopic($topic, $envelope);
+        $this->bridge->publishTopic($topic, $envelope, true);
     }
 
     /**
