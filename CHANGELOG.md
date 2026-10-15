@@ -1,3 +1,9 @@
+# v1.2.3
+## 10/14/2026
+
+1. [](#bugfix)
+    * The `install`, `start` and `enable` commands now save their settings to the main `user/config` folder instead of an environment folder, so they can no longer quietly override settings saved in the admin. Pass `--env <name>` to save to an existing environment folder instead.
+
 # v1.2.2
 ## 09/23/2026
 

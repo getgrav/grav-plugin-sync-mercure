@@ -372,17 +372,43 @@ abstract class MercureCommandBase extends ConsoleCommand
     }
 
     /**
-     * Path to the per-environment config override file. Writing here
-     * leaves the plugin's bundled sync-mercure.yaml defaults intact and
-     * just layers the overrides we generate on top.
+     * Path to the site's sync-mercure.yaml override. Writing here leaves
+     * the plugin's bundled sync-mercure.yaml defaults intact and just
+     * layers the overrides we generate on top.
+     *
+     * Always base user/config, never the first config:// folder: that
+     * stream resolves to an environment overlay (user/env/<env>/config)
+     * whenever one exists, even for the default `cli` environment, and
+     * values written there silently hide anything later saved to base.
+     * The only exception is an explicit `--env <name>` whose config
+     * folder already exists; a missing one is never created.
      */
     protected function userConfigPath(): string
     {
-        $base = (string)\Grav\Common\Grav::instance()['locator']->findResource('config://', true);
-        if ($base === '') {
-            $base = (string)\Grav\Common\Grav::instance()['locator']->findResource('user://config', true);
+        $locator = \Grav\Common\Grav::instance()['locator'];
+
+        $dir = '';
+        if ($this->requestedEnvironment() !== null) {
+            $dir = (string)$locator->findResource('environment://config', true);
         }
-        return rtrim($base, '/') . '/plugins/sync-mercure.yaml';
+        if ($dir === '') {
+            $dir = (string)$locator->findResource('user://config', true);
+        }
+        return rtrim($dir, '/') . '/plugins/sync-mercure.yaml';
+    }
+
+    /**
+     * The environment named with `--env <name>` on the command line, or
+     * null when none was given (Grav then boots the default `cli` env).
+     */
+    protected function requestedEnvironment(): ?string
+    {
+        $input = $this->input ?? null;
+        if ($input === null || !$input->hasOption('env')) {
+            return null;
+        }
+        $env = trim((string)$input->getOption('env'));
+        return $env !== '' ? $env : null;
     }
 
     /**
@@ -430,8 +456,11 @@ abstract class MercureCommandBase extends ConsoleCommand
 
         $existing['hub'] = $hub;
         // Make sure the plugin is enabled in the override too — if the
-        // user hand-disabled it we leave their value intact.
-        if (!array_key_exists('enabled', $existing)) {
+        // user hand-disabled it we leave their value intact. Base only:
+        // an environment overlay inherits `enabled` from base, and pinning
+        // it there would hide a later enable/disable saved to base.
+        $isBase = dirname($path, 2) === rtrim((string)\Grav\Common\Grav::instance()['locator']->findResource('user://config', true), '/');
+        if ($isBase && !array_key_exists('enabled', $existing)) {
             $existing['enabled'] = true;
         }
 
