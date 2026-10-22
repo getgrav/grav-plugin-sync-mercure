@@ -55,10 +55,11 @@ class InstallCommand extends MercureCommandBase
                 return 1;
             }
             $archMapped = in_array($arch, ['arm64', 'aarch64'], true) ? 'arm64' : 'x86_64';
-            // /latest/download/ always redirects to the current release.
+            // Pinned: Mercure 1.x changed the token format and subscribe URLs,
+            // and won't start with the Caddyfile this plugin writes.
             // Asset naming as of Mercure 0.23: mercure_<Platform>_<arch>.tar.gz
             $tarball = "mercure_{$platform}_{$archMapped}.tar.gz";
-            $url = "https://github.com/dunglas/mercure/releases/latest/download/{$tarball}";
+            $url = 'https://github.com/dunglas/mercure/releases/download/v' . self::MERCURE_VERSION . "/{$tarball}";
 
             $io->writeln("Fetching {$url}");
             $bytes = $this->httpGet($url);

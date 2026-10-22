@@ -1,3 +1,9 @@
+# v1.2.4
+## 10/22/2026
+
+1. [](#bugfix)
+    * `bin/plugin sync-mercure install` now installs Mercure 0.24.2 instead of the latest release, since the new Mercure 1.x hub wouldn't start with the configuration this plugin writes [#2](https://github.com/getgrav/grav-plugin-sync-mercure/issues/2)
+
 # v1.2.3
 ## 10/14/2026
 

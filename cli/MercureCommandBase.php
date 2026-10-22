@@ -14,7 +14,7 @@ use Grav\Console\ConsoleCommand;
  */
 abstract class MercureCommandBase extends ConsoleCommand
 {
-    protected const MERCURE_VERSION = '0.20.0';
+    protected const MERCURE_VERSION = '0.24.2';
 
     /** systemd unit basename (becomes grav-mercure.service). */
     protected const SERVICE_NAME = 'grav-mercure';
