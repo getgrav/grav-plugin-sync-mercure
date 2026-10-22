@@ -59,6 +59,29 @@ form:
       label: Subscriber JWT Secret
       help: HMAC secret PHP signs subscriber JWTs with. Must match the hub's SUBSCRIBER_JWT_KEY env var. Often the same as publisher secret in single-tenant setups.
 
+    hub.protocol:
+      type: select
+      label: Mercure Protocol
+      default: auto
+      options:
+        auto: Detect automatically
+        '1': Mercure 1.x
+        '0': Mercure 0.x
+      help: Which Mercure generation the hub runs. Detect automatically asks the hub once an hour. Tokens work with both, so this only decides how browsers ask for their updates.
+
+    hub.issuer:
+      type: text
+      label: Token Issuer
+      default: 'https://localhost'
+      placeholder: 'https://localhost'
+      help: Mercure 1.x only. Every token names this issuer, and the hub only accepts tokens from an issuer its configuration lists (the issuer block, or MERCURE_TRUSTED_ISSUERS on the official Docker image, which defaults to https://localhost). The hub this plugin installs is configured with this value automatically.
+
+    hub.resource_identifier:
+      type: text
+      label: Hub Resource Identifier
+      placeholder: https://example.com/.well-known/mercure
+      help: Mercure 1.x only. Leave blank unless your hub pins resource_identifier, then enter the same value. Tokens always accept the public and internal hub URLs too. The hub this plugin installs pins the public hub URL, or this value when set.
+
     section_topics:
       type: section
       title: Topics

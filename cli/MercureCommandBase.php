@@ -14,7 +14,13 @@ use Grav\Console\ConsoleCommand;
  */
 abstract class MercureCommandBase extends ConsoleCommand
 {
-    protected const MERCURE_VERSION = '0.24.2';
+    /**
+     * Hub release `install` downloads. Pinned rather than /latest/ so a new
+     * Mercure major can't change the protocol under a fresh install. An
+     * existing install keeps whatever binary it has: writeCaddyfile() writes
+     * the config that binary's generation understands.
+     */
+    protected const MERCURE_VERSION = '1.1.4';
 
     /** systemd unit basename (becomes grav-mercure.service). */
     protected const SERVICE_NAME = 'grav-mercure';
@@ -221,7 +227,7 @@ abstract class MercureCommandBase extends ConsoleCommand
      *      Symfony-recommended local-dev setup.
      *   3. Otherwise fall back to a self-signed cert via openssl. Browsers
      *      will show a one-time warning the first time the user visits
-     *      https://localhost:3001/healthz; once accepted, EventSource
+     *      https://localhost:3001/healthz; once accepted, hub
      *      connections work for the lifetime of that exception.
      *
      * Returns ['cert' => …, 'key' => …, 'tool' => 'mkcert'|'openssl'|'reused'].
@@ -288,17 +294,21 @@ abstract class MercureCommandBase extends ConsoleCommand
      * collides on 2019 even after the data port has been bumped.
      *
      * `transport` is set explicitly because Mercure 0.24 dropped the implicit
-     * default transport — without it the hub aborts at startup with "invalid
+     * default transport: without it the hub aborts at startup with "invalid
      * transport". We use `local` (in-memory) rather than bolt: the bolt module
      * shipped in Mercure 0.24.2 aborts provisioning with "invalid transport:
      * timeout" even with the modern `transport bolt { path … }` block, so it is
-     * unusable on this build. The tradeoff is no on-disk Last-Event-ID replay;
+     * unusable on that build. The tradeoff is no on-disk Last-Event-ID replay;
      * collaborative clients resync through the API on reconnect anyway.
      *
      * No `anonymous`: every Grav client subscribes with a JWT, and sync
      * updates are published private, so a connection without one has
-     * nothing to receive. `cors_origins *` stays, since subscribers
-     * authenticate with the JWT in the query string, not with cookies.
+     * nothing to receive. `cors_origins *` stays, since subscribers send the
+     * JWT in the Authorization header, not in a cookie.
+     *
+     * The JWT keys are written for the installed binary's generation (see
+     * jwtDirectives()). `respond /healthz 200` stays on both: Forum Pro's
+     * status report probes it.
      */
     protected function writeCaddyfile(string $certFile, string $keyFile, int $port = 3001): string
     {
@@ -314,8 +324,7 @@ abstract class MercureCommandBase extends ConsoleCommand
 
     mercure {
         transport local
-        publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
-        subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
+' . $this->jwtDirectives($port) . '
         cors_origins *
     }
 
@@ -323,7 +332,111 @@ abstract class MercureCommandBase extends ConsoleCommand
 }
 ';
         file_put_contents($confPath, $conf);
+        $this->forgetHubProtocol();
         return $confPath;
+    }
+
+    /**
+     * JWT key directives for the installed hub. The keys stay in the
+     * environment (MERCURE_*_JWT_KEY), never in the file.
+     *
+     *   - 0.x: top-level `publisher_jwt` / `subscriber_jwt`.
+     *   - 1.x: an `issuer` block named after `hub.issuer` (the `iss` every
+     *     token carries), and `resource_identifier` pinned to
+     *     `hub.resource_identifier` or else the public hub URL, so the
+     *     token audience matches however the request reaches the hub
+     *     (directly, or through a reverse proxy that rewrites the Host).
+     *     The top-level 0.x directives are a startup error on 1.x unless
+     *     compatibility mode is on, and a 0.x binary doesn't know the block.
+     */
+    protected function jwtDirectives(int $port): string
+    {
+        if ($this->hubMajorVersion() < 1) {
+            return "        publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}\n"
+                . '        subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}';
+        }
+
+        $config = \Grav\Common\Grav::instance()['config'];
+        $issuer = trim((string)$config->get('plugins.sync-mercure.hub.issuer', '')) ?: 'https://localhost';
+        $resource = trim((string)$config->get('plugins.sync-mercure.hub.resource_identifier', ''));
+        if ($resource === '') {
+            $resource = $this->publicUrlOnPort($port);
+        }
+
+        return ($resource !== '' ? '        resource_identifier ' . $this->caddyToken($resource) . "\n" : '')
+            . '        issuer ' . $this->caddyToken($issuer) . " {\n"
+            . "            publisher {\n"
+            . "                jwt {env.MERCURE_PUBLISHER_JWT_KEY} HS256\n"
+            . "            }\n"
+            . "            subscriber {\n"
+            . "                jwt {env.MERCURE_SUBSCRIBER_JWT_KEY} HS256\n"
+            . "            }\n"
+            . '        }';
+    }
+
+    /**
+     * Major version of the installed hub binary, from `mercure version`
+     * ("Mercure.rocks 1.1.4 Caddy v2.11.7 ..."). When the binary can't say,
+     * a forced `hub.protocol` of 0 or 1 decides, else 0.x is assumed.
+     */
+    protected function hubMajorVersion(): int
+    {
+        $version = $this->hubVersion();
+        if ($version !== null) {
+            return (int)$version;
+        }
+        $forced = (string)\Grav\Common\Grav::instance()['config']->get('plugins.sync-mercure.hub.protocol', 'auto');
+
+        return $forced === '1' ? 1 : 0;
+    }
+
+    /** Version of the installed hub binary ("1.1.4"), or null when unknown. */
+    protected function hubVersion(): ?string
+    {
+        $bin = $this->binPath();
+        if (!is_file($bin) || !function_exists('shell_exec')) {
+            return null;
+        }
+        $out = (string)@shell_exec(escapeshellarg($bin) . ' version 2>/dev/null');
+
+        return preg_match('/Mercure\.rocks\s+v?(\d+\.\d+(?:\.\d+)?)/', $out, $m) ? $m[1] : null;
+    }
+
+    /** The configured public hub URL with its port swapped for the one the hub binds. */
+    protected function publicUrlOnPort(int $port): string
+    {
+        $url = (string)\Grav\Common\Grav::instance()['config']->get('plugins.sync-mercure.hub.public_url', '');
+        if ($url === '') {
+            return 'https://localhost:' . $port . '/.well-known/mercure';
+        }
+        $current = (int)parse_url($url, PHP_URL_PORT);
+        if ($current > 0 && $current !== $port) {
+            $url = preg_replace('#:' . $current . '(/|$)#', ':' . $port . '$1', $url, 1) ?? $url;
+        }
+
+        return $url;
+    }
+
+    /** A Caddyfile token: bare when it can be, double-quoted otherwise. */
+    protected function caddyToken(string $value): string
+    {
+        if ($value !== '' && preg_match('/^[^\s"{}#`\\\\]+$/', $value)) {
+            return $value;
+        }
+
+        return '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], $value) . '"';
+    }
+
+    /**
+     * Forget the cached protocol answer for the configured hub, so the
+     * site asks the hub again after this (re)start. Best effort.
+     */
+    protected function forgetHubProtocol(): void
+    {
+        try {
+            (new \Grav\Plugin\SyncMercure\MercureBridge(\Grav\Common\Grav::instance()['config']))->forgetProtocol();
+        } catch (\Throwable) {
+        }
     }
 
     protected function rrmdir(string $dir): void

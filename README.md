@@ -16,9 +16,7 @@ When the plugin is enabled and a hub URL is configured:
 
 - The Sync API advertises `mercure` in its `/sync/capabilities` response,
   with `preferred: "mercure"`.
-- Admin-next clients pick `MercureProvider` over `PollingProvider` and
-  open an `EventSource` per page (one channel for Yjs document updates,
-  one for awareness deltas).
+- Admin-next clients pick `MercureProvider` over `PollingProvider` and open one streaming connection per page that carries both the Yjs document topic and the awareness topic, with the hub token in the `Authorization` header.
 - Every page push and presence heartbeat that PHP receives is also
   republished to the hub on the side, so subscribers receive within
   milliseconds rather than waiting for the next poll.
@@ -64,13 +62,9 @@ bin/plugin sync-mercure start     # https://localhost:3001 in the background
 bin/plugin sync-mercure status    # check
 ```
 
-That's it. Hard-reload admin-next in your browser; the next page-edit
-will use Mercure transport. To verify, watch the Network tab for a
-long-lived `EventSource` connection to `localhost:3001`.
+That's it. Hard-reload admin-next in your browser; the next page-edit will use Mercure transport. To verify, watch the Network tab for a long-lived request to `localhost:3001/.well-known/mercure` (type `fetch`, still pending while the page is open).
 
-If you don't install mkcert, the plugin falls back to a self-signed
-cert via `openssl`. Visit `https://localhost:3001/healthz` once in
-each browser to accept it; the EventSource will then connect.
+If you don't install mkcert, the plugin falls back to a self-signed cert via `openssl`. Visit `https://localhost:3001/healthz` once in each browser to accept it; the hub connection will then work.
 
 The bundled CLI also covers:
 
@@ -95,11 +89,31 @@ user/data/sync-mercure/
 ├── mercure          # binary
 ├── mercure.pid
 ├── mercure.log
-├── Caddyfile        # rewritten on each `start` (admin off, explicit transport)
-├── mercure.db       # bolt history store (message replay on reconnect)
+├── Caddyfile        # rewritten on each `start`/`enable` for the installed Mercure version
 ├── cert.pem         # TLS cert + key
 └── key.pem
 ```
+
+### Mercure 0.x and 1.x
+
+The plugin works with both hub generations. Mercure 1.0 changed how clients subscribe (`match=` instead of `topic=`) and what a token must contain (an OAuth access token with an issuer, an audience and `authorization_details`), so the plugin does both at once:
+
+- Every token it signs carries the 0.x `mercure` claim and the 1.x claims side by side, so the same token works on a 0.x hub, on a 1.x hub in compatibility mode and on a modern 1.x hub.
+- Browsers always send the token in the `Authorization` header (Mercure 1.x no longer accepts it in the URL, and a token in a URL ends up in access logs).
+- `hub.protocol: auto` (the default) asks the hub which generation it runs, once an hour, and tells the browser to subscribe with `match=` or `topic=`. If the hub answers 400 anyway, the browser switches to the other parameter on its own.
+
+`bin/plugin sync-mercure install` downloads Mercure 1.1.4 (pinned, so a future release can't change the protocol under a fresh install). An existing install keeps the binary it already has, and `start` and `enable` write the Caddyfile that binary understands: the top-level `publisher_jwt` / `subscriber_jwt` directives for 0.x, an `issuer` block plus a pinned `resource_identifier` for 1.x.
+
+To move a bundled hub from 0.x to 1.x:
+
+```sh
+bin/plugin sync-mercure stop          # or `disable` if you used `enable`
+rm user/data/sync-mercure/mercure
+bin/plugin sync-mercure install       # downloads 1.1.4
+bin/plugin sync-mercure start         # or `enable`
+```
+
+Hard-reload open admin tabs afterwards so they pick up the new protocol.
 
 ---
 
@@ -130,6 +144,18 @@ hub:
   publisher_secret:  'a-cryptographically-random-64-hex-char-secret'
   subscriber_secret: 'optionally-different-from-publisher'
 
+  # auto (ask the hub), 1 (Mercure 1.x) or 0 (Mercure 0.x).
+  protocol: auto
+
+  # Mercure 1.x: the `iss` every token carries. Must match the hub's
+  # `issuer` block (MERCURE_TRUSTED_ISSUERS on the official Docker image,
+  # which defaults to https://localhost).
+  issuer: 'https://localhost'
+
+  # Mercure 1.x: only when the hub pins `resource_identifier`; enter the
+  # same value. Tokens always list public_url and internal_url as well.
+  resource_identifier: ''
+
 topics:
   prefix: 'urn:grav:sync:'
 
@@ -140,6 +166,8 @@ token_ttl_seconds: 600
 
 The plugin generates fresh secrets on first install for local dev.
 For production, **regenerate these values** (`openssl rand -hex 32`).
+
+On a Mercure 1.x hub, a token is accepted only when its issuer and audience match the hub. The issuer is `hub.issuer`. The audience is the hub's resource identifier, which a 1.x hub works out from each request's URL unless you pin it with `resource_identifier`; the plugin's tokens list `hub.resource_identifier`, `hub.public_url` and `hub.internal_url`, so a hub reached directly on those URLs works without pinning anything. Behind a reverse proxy that terminates TLS, the hub sees `http://` and the proxy's Host header instead of your public URL, so pin `resource_identifier` to your `public_url` in the hub config (as in the examples below).
 
 ### Autostart on reboot (`enable`)
 
@@ -171,6 +199,8 @@ the manager owns the process and restarts it on crash. `disable` reverses
 all of the above. Because the manager keeps the hub alive, use `disable`
 (not `stop`) to take it down once enabled.
 
+The Caddyfile the service runs is written at `enable` time for the installed binary's Mercure version, with `hub.issuer` and the public URL (or `hub.resource_identifier`) filled in for a 1.x hub. Run `disable` then `enable` again after changing those settings or swapping the binary.
+
 For multi-host or container deployments, prefer a hand-managed unit as
 below.
 
@@ -198,7 +228,7 @@ Restart=on-failure
 WantedBy=multi-user.target
 ```
 
-A minimal `Caddyfile` for that setup with proper TLS via Let's Encrypt:
+A minimal `Caddyfile` for that setup with proper TLS via Let's Encrypt, for Mercure 1.x (the binary `install` downloads). The issuer must equal `hub.issuer`:
 
 ```caddy
 {
@@ -209,14 +239,30 @@ hub.example.com {
     encode zstd gzip
 
     mercure {
-        publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
-        subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
+        transport local
+        issuer https://localhost {
+            publisher {
+                jwt {env.MERCURE_PUBLISHER_JWT_KEY} HS256
+            }
+            subscriber {
+                jwt {env.MERCURE_SUBSCRIBER_JWT_KEY} HS256
+            }
+        }
         cors_origins https://your-grav-site.example.com
     }
 
     respond /healthz 200
 }
 ```
+
+For a Mercure 0.x binary, replace the `issuer` block with the old top-level directives:
+
+```caddy
+        publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}
+        subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}
+```
+
+A 1.x hub that still has those 0.x directives refuses to start unless you add `protocol_version_compatibility 8`. That compatibility mode works with this plugin too, but it relaxes token checks for 0.x clients, so prefer the `issuer` block. With the official Docker image, set `MERCURE_PUBLISHER_JWT_KEY`, `MERCURE_SUBSCRIBER_JWT_KEY` and `MERCURE_TRUSTED_ISSUERS` (equal to `hub.issuer`).
 
 ### Running behind your existing reverse proxy
 
@@ -263,6 +309,8 @@ hub:
   internal_url: 'http://127.0.0.1:3000/.well-known/mercure'
 ```
 
+For a Mercure 1.x hub behind the proxy, add `resource_identifier https://your-grav-site.example.com/.well-known/mercure` to its `mercure` block, so the token audience matches whatever Host and scheme the proxy passes on.
+
 Same-origin subscribers — no CORS preflight, no mixed content concerns.
 
 ### Bring-your-own TLS cert (without mkcert)
@@ -295,8 +343,8 @@ doesn't manage it.
 │   admin-next   │ ───── HTTP push ────────────▶│  grav-plugin-  │
 │   (browser)    │ ◀─── HTTP pull ────────────▶ │  api (PHP)     │
 │                │                              │                │
-│  EventSource   │ ◀──────── SSE ───────────────│ MercureBridge  │
-│  (per channel) │                              │  POST update   │
+│ fetch stream   │ ◀──────── SSE ───────────────│ MercureBridge  │
+│ (doc + aw)     │                              │  POST update   │
 └────────────────┘                              └────────┬───────┘
        ▲                                                 │
        │                                                 ▼
@@ -310,9 +358,7 @@ doesn't manage it.
   in `grav-plugin-sync`) stays the source of truth.
 - After PHP appends the update to its log, it `POST`s a copy to the hub
   with a short-lived publisher JWT.
-- Subscribers (admin-next clients with active page-edit sessions) hold
-  open EventSource connections to the hub. Each gets the new update
-  within ~50ms and applies it to their local Y.Doc.
+- Subscribers (admin-next clients with active page-edit sessions) hold one open streaming connection to the hub, with the subscriber JWT in the `Authorization` header. Each gets the new update within ~50ms and applies it to their local Y.Doc. When the token expires the hub answers 401 on the next reconnect, and the client fetches a fresh one from `POST /sync/mercure/token`.
 - Each room uses two topics:
   - `urn:grav:sync:<roomId>:doc`  — Yjs document updates
   - `urn:grav:sync:<roomId>:aw`   — awareness deltas (cursor / selection)
@@ -331,6 +377,10 @@ doesn't manage it.
 | `hub.internal_url` | _(empty, falls back to public_url)_ | URL PHP uses to publish. Use when PHP can reach the hub on a faster/private network. |
 | `hub.publisher_secret` | _(empty)_ | HMAC key for publisher JWTs. Must match hub's `MERCURE_PUBLISHER_JWT_KEY`. |
 | `hub.subscriber_secret` | _(empty)_ | HMAC key for subscriber JWTs. Must match hub's `MERCURE_SUBSCRIBER_JWT_KEY`. Often equal to publisher_secret. |
+| `hub.protocol` | `auto` | Mercure generation of the hub: `auto` asks the hub (cached for an hour), `1` for Mercure 1.x, `0` for 0.x. Only decides whether browsers subscribe with `match=` or `topic=`. |
+| `hub.issuer` | `https://localhost` | Mercure 1.x: the `iss` of every token. Must match the hub's `issuer` block. |
+| `hub.resource_identifier` | _(empty)_ | Mercure 1.x: set when the hub pins `resource_identifier`. Tokens also list the public and internal URLs as audiences. |
+| `hub.internal_tls_insecure` | _(auto)_ | Skip TLS verification when PHP publishes. Defaults to on for a loopback `internal_url`, off otherwise. |
 | `topics.prefix` | `urn:grav:sync:` | URI prefix combined with the canonical room id to form topic URIs. |
 | `token_ttl_seconds` | `600` | Lifetime of subscriber JWTs issued to clients. |
 
@@ -352,22 +402,21 @@ permission needs to be granted.
 
 ## Troubleshooting
 
-**EventSource connection fails / `net::ERR_CERT_AUTHORITY_INVALID`**
+**Hub connection fails / `net::ERR_CERT_AUTHORITY_INVALID`**
 The hub is using a self-signed cert and the browser doesn't trust it.
 Either install mkcert and rerun `bin/plugin sync-mercure install`, or
 visit `https://localhost:3001/healthz` once to accept the cert.
 
-**`Mixed Content: ... was loaded over HTTPS, but requested an insecure
-EventSource`**
+**`Mixed Content: ... was loaded over HTTPS, but requested an insecure resource`**
 Your admin-next is HTTPS but `hub.public_url` points at an HTTP URL.
 Change `hub.public_url` to HTTPS or front the hub with a proxy that
 terminates TLS.
 
-**`"forbidden" / 403` on the EventSource subscribe request**
-The subscriber JWT issued by PHP doesn't match the hub's
-`MERCURE_SUBSCRIBER_JWT_KEY`. Confirm `hub.subscriber_secret` in
-`sync-mercure.yaml` is identical to the env var the hub was started
-with.
+**401 or 403 on the hub subscribe request, or `publish ... was refused` in the Grav log**
+The hub doesn't accept the token. Confirm `hub.publisher_secret` and `hub.subscriber_secret` match the keys the hub was started with. On a Mercure 1.x hub, also check that `hub.issuer` equals the hub's `issuer` block, and, if the hub pins `resource_identifier`, that `hub.resource_identifier` has the same value. A single 401 after the page has been open for a while is normal: the token expired, and the client fetches a new one.
+
+**400 on the hub subscribe request**
+The browser asked with the other generation's parameter (`topic=` on a modern 1.x hub, `match=` on 0.x). It retries with the other one by itself; if the 400 stays, set `hub.protocol` to `0` or `1` by hand.
 
 **`Process exited immediately` from `bin/plugin sync-mercure start`**
 Run `bin/plugin sync-mercure logs`. Most common causes:
@@ -399,7 +448,7 @@ with its topic and id. Useful for confirming PHP is reaching the hub.
   convenience. **Tighten this in production** by editing your hub's
   Caddyfile to list only the admin-next origins that should subscribe.
 
-- **JWT scoping**: every sync update (document edits, awareness, and every channel broadcast) is published as a private Mercure update, and subscriber JWTs carry a `mercure.subscribe` claim naming only the topics of the room or channel the user was admitted to. The hub delivers a private update only to subscribers whose JWT names its topic, so a user can't read another room or channel with their token, and nobody can read anything without one. Clients can't publish either: the hub checks the `publish` claim separately, and PHP never issues it to clients.
+- **JWT scoping**: every sync update (document edits, awareness, and every channel broadcast) is published as a private Mercure update, and subscriber JWTs grant subscribe access (the 0.x `mercure.subscribe` claim and the 1.x `authorization_details`) to only the topics of the room or channel the user was admitted to. The hub delivers a private update only to subscribers whose JWT names its topic, so a user can't read another room or channel with their token, and nobody can read anything without one. Clients can't publish either: the hub checks the `publish` claim separately, and PHP never issues it to clients.
 
 - **Anonymous subscribers**: hub configs generated before 1.2.2 carry `anonymous`, and every update was public, so anyone who knew or guessed a topic could listen in. Updating the plugin makes the updates private straight away. Restart the bundled hub (`bin/plugin sync-mercure stop` then `start`, or `disable` then `enable` for the autostart service) to regenerate its Caddyfile without `anonymous`. A hub you run yourself needs the line removed by hand.
 
@@ -440,8 +489,7 @@ the same wire output it always did. Both pipelines coexist.
 
 The plugin ships `assets/js/sync-mercure-client.js` and auto-enqueues it
 on every frontend page when `plugins.sync-mercure.enabled` is true.
-Consumer plugins don't bundle their own EventSource subscriber; they
-just call into the global.
+Consumer plugins don't bundle their own hub subscriber; they just call into the global. It connects with a streaming fetch and sends the JWT in the `Authorization` header.
 
 ```js
 // Initialize the connection. Returns false on incomplete config (the
@@ -451,10 +499,13 @@ window.SyncMercure.init(config, handlers);
 //     hubUrl: string,
 //     jwt: string,
 //     topics: { main: string, typing?: string },
+//     protocol?: number,          // from clientConfig: 1 = match=, 0 = topic=
 //     heartbeatSeconds?: number,
 //     typingPostUrl?: string
 //   }
 //   handlers: { onUpdate, onFailover, onTypingChange? }
+//   onFailover also fires right away when the hub refuses the JWT (it
+//   expired): fetch a fresh config and call init() again, or poll.
 
 // Send a typing-presence event. POSTs to handlers.typingPostUrl with
 // throttling and an automatic heartbeat while 'start' is active.
@@ -462,12 +513,12 @@ window.SyncMercure.init(config, handlers);
 window.SyncMercure.sendTyping('start');
 window.SyncMercure.sendTyping('stop');
 
-// Close the EventSource and clear all timers. Safe to call multiple times.
+// Close the hub connection and clear all timers. Safe to call multiple times.
 window.SyncMercure.disconnect();
 ```
 
 The server-side `MercureTransport::clientConfig()` returns the
-`hubUrl`, `jwt`, and `topics` keys; consumer plugins fill in
+`hubUrl`, `jwt`, `topics` and `protocol` keys; consumer plugins fill in
 `typingPostUrl` and `heartbeatSeconds` before passing the merged config
 to `init()`.
 
@@ -515,9 +566,10 @@ $jwt = $mercure->issueSubscriberJwtForTopics(
     ttlSeconds: 600,
 );
 
-// Hand $jwt + $mercure->publicHubUrl() back to the browser; the browser
-// opens an EventSource against the hub URL with the JWT in a cookie or
-// Authorization header (see Mercure's own docs for client setup).
+// Hand $jwt, $mercure->publicHubUrl() and $mercure->protocolVersion() to
+// the browser. It subscribes with a streaming fetch (EventSource can't send
+// headers) carrying `Authorization: Bearer <jwt>`, one `match=<topic>` per
+// topic when the protocol is 1, `topic=<topic>` when it is 0.
 ```
 
 **Topic-prefix discipline.** Each plugin owns its own URI prefix and is

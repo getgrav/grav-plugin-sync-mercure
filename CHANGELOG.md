@@ -1,8 +1,15 @@
 # v1.2.4
 ## 10/22/2026
 
-1. [](#bugfix)
-    * `bin/plugin sync-mercure install` now installs Mercure 0.24.2 instead of the latest release, since the new Mercure 1.x hub wouldn't start with the configuration this plugin writes [#2](https://github.com/getgrav/grav-plugin-sync-mercure/issues/2)
+1. [](#new)
+    * Works with Mercure 1.x hubs as well as the 0.x hubs it already supported, so you can move to the new hub whenever suits you. Thanks @Gleydar, whose fork this builds on [#2](https://github.com/getgrav/grav-plugin-sync-mercure/issues/2)
+    * New Mercure Protocol, Token Issuer and Hub Resource Identifier settings for hubs you run yourself, with the protocol detected automatically by default
+2. [](#improved)
+    * Browsers now send the hub token in a request header instead of the web address, so it no longer lands in server logs. Thanks @Gleydar
+    * The hub config that `start` and `enable` write now matches the Mercure version installed, so existing 0.x installs keep working untouched
+3. [](#bugfix)
+    * `bin/plugin sync-mercure install` now installs Mercure 1.1.4 instead of the latest release, so a future Mercure release can't break a fresh install [#2](https://github.com/getgrav/grav-plugin-sync-mercure/issues/2)
+    * A publish the hub turns away is now logged as a failure instead of being treated as sent. Thanks @Gleydar
 
 # v1.2.3
 ## 10/14/2026

@@ -4,10 +4,19 @@
  * Generic browser-side Mercure subscriber. Any consumer plugin that opts into
  * the sync transport pipeline and lands on the mercure transport gets back a
  * clientConfig blob from the server (see MercureTransport::clientConfig) and
- * passes it to this module. The module owns the EventSource connection,
+ * passes it to this module. The module owns the hub connection,
  * topic-discriminated routing, Last-Event-ID-driven reconnect, terminal-error
  * failover handoff, and (optionally) typing presence with heartbeat plus TTL
  * eviction.
+ *
+ * The connection is a streaming fetch rather than an EventSource, so the JWT
+ * travels in the Authorization header. Mercure 1.x removed the
+ * `authorization` query parameter EventSource depended on, and the header
+ * works on 0.x hubs too. `config.protocol` (from the server) picks the
+ * subscribe parameter: 1 subscribes with `match=` (Mercure 1.x), 0 or
+ * missing with `topic=` (0.x). A hub that answers 400 to one is retried
+ * with the other, so a consumer that doesn't pass `protocol` still works.
+ * Streaming fetch code adapted from @Gleydar's Mercure 1.x fork.
  *
  * Public API (window.SyncMercure):
  *   init(config, handlers): boolean
@@ -18,6 +27,7 @@
  *         jwt: string,
  *         topics: [string, ...] | { main: string, typing?: string },
  *         apiVersion: number,
+ *         protocol?: number,        // 1 = Mercure 1.x, 0 = 0.x
  *         // Consumer-supplied extras (filled in by the caller before init):
  *         typingPostUrl?: string,
  *         heartbeatSeconds?: number
@@ -25,6 +35,10 @@
  *     handlers: { onUpdate?, onFailover?, onTypingChange? }
  *       Both `handlers` and `config` are passed in by the consumer plugin;
  *       this SDK does not know which plugin it is serving.
+ *       onFailover fires when the hub keeps failing, and right away when it
+ *       refuses the JWT (401/403, usually an expired token). The consumer
+ *       then fetches a fresh config, which mints a fresh JWT, and calls
+ *       init() again, or falls back to polling.
  *
  *   sendTyping(action, extras): void
  *     action is 'start' or 'stop'. Throttled to once per heartbeatSeconds for
@@ -34,14 +48,19 @@
  *     and the server is expected to relay them back in the broadcast payload.
  *
  *   disconnect(): void
- *     Closes the EventSource, clears all timers, and forgets typing state.
+ *     Closes the hub connection, clears all timers, and forgets typing state.
  *     Safe to call multiple times.
  */
 (function() {
   'use strict';
 
   // Module-private state. A single subscription per page is supported.
-  var es = null;                  // active EventSource, or null
+  var stream = null;              // active { abort } handle, or null
+  var retryTimer = null;          // pending reconnect timer
+  var connectionId = 0;           // bumps on init/disconnect so stale streams stand down
+  var lastEventId = '';           // resume point sent as Last-Event-ID on reconnect
+  var retryMs = 1000;             // reconnect delay; the hub may set it with `retry:`
+  var useMatch = false;           // subscribe parameter: true = match= (1.x), false = topic= (0.x)
   var consecutiveErrors = 0;      // reconnect-failure counter for failover
   var failedOver = false;         // latches once we hand off to polling
   var typingMap = null;           // Map<userId, {ts, meta}> — meta = server-relayed extras
@@ -54,19 +73,128 @@
   var activeHandlers = null;
 
   function buildHubUrl(config) {
-    // EventSource cannot set Authorization headers, so per Mercure spec the
-    // JWT is passed as the `authorization` query parameter for cross-origin
-    // clients (Mercure also accepts a same-origin `mercureAuthorization`
-    // cookie, but query-param auth is more portable).
-    var url = new URL(config.hubUrl);
-    url.searchParams.append('topic', config.topics.main);
+    var url = new URL(config.hubUrl, window.location.href);
+    // A token or subscribe parameter baked into the configured hub URL
+    // would leak into logs or clash with ours, so strip them.
+    ['authorization', 'access_token', 'topic', 'match', 'lastEventID', 'last_event_id', 'Last-Event-ID'].forEach(function(k) {
+      url.searchParams.delete(k);
+    });
+    var param = useMatch ? 'match' : 'topic';
+    url.searchParams.append(param, config.topics.main);
     if (config.topics.typing) {
-      url.searchParams.append('topic', config.topics.typing);
-    }
-    if (config.jwt) {
-      url.searchParams.append('authorization', config.jwt);
+      url.searchParams.append(param, config.topics.typing);
     }
     return url.toString();
+  }
+
+  // Server-Sent Events parser over a fetch body. Calls onEvent(data) for
+  // every complete event with data and no type (or type "message"); updates
+  // with a custom type aren't ours. Remembers the last event id.
+  function readEvents(body, id, onEvent) {
+    var reader = body.getReader();
+    var decoder = new TextDecoder();
+    var pending = '';
+    var data = [];
+    var eventType = '';
+    var eventId = null;
+
+    function dispatch() {
+      if (eventId !== null) lastEventId = eventId;
+      if (data.length && (eventType === '' || eventType === 'message')) {
+        onEvent(data.join('\n'));
+      }
+      data = [];
+      eventType = '';
+      eventId = null;
+    }
+
+    function parseLine(line) {
+      if (line.endsWith('\r')) line = line.slice(0, -1);
+      if (line === '') { dispatch(); return; }
+      if (line[0] === ':') return;
+      var colon = line.indexOf(':');
+      var field = colon < 0 ? line : line.slice(0, colon);
+      var value = colon < 0 ? '' : line.slice(colon + 1);
+      if (value[0] === ' ') value = value.slice(1);
+      if (field === 'data') data.push(value);
+      else if (field === 'event') eventType = value;
+      else if (field === 'id' && value.indexOf('\0') < 0) eventId = value;
+      else if (field === 'retry' && /^\d+$/.test(value)) retryMs = Number(value);
+    }
+
+    function read() {
+      return reader.read().then(function(result) {
+        if (id !== connectionId) {
+          try { reader.cancel(); } catch (e) {}
+          return;
+        }
+        if (result.done) {
+          pending += decoder.decode();
+          if (pending) parseLine(pending);
+          throw new Error('Mercure stream closed');
+        }
+        pending += decoder.decode(result.value, { stream: true });
+        var end;
+        while ((end = pending.indexOf('\n')) !== -1) {
+          parseLine(pending.slice(0, end));
+          pending = pending.slice(end + 1);
+        }
+        return read();
+      });
+    }
+    return read();
+  }
+
+  function connect(config, id, flipped) {
+    if (id !== connectionId || failedOver) return;
+    var controller = new AbortController();
+    stream = controller;
+    var headers = { Accept: 'text/event-stream', Authorization: 'Bearer ' + config.jwt };
+    // 1.x renamed the reconnect query parameter, but this request header
+    // kept its name on both generations.
+    if (lastEventId) headers['Last-Event-ID'] = lastEventId;
+
+    fetch(buildHubUrl(config), {
+      headers: headers,
+      signal: controller.signal,
+      credentials: 'omit',
+      cache: 'no-store',
+      // A redirect would drop the Authorization header (cross-origin) or
+      // forward it somewhere else; the hub URL has to be the real endpoint.
+      redirect: 'error'
+    }).then(function(response) {
+      if (id !== connectionId) return;
+      if (response.status === 400 && !flipped) {
+        // The hub doesn't speak the protocol we guessed: 0.x rejects
+        // `match=`, a modern 1.x hub rejects `topic=`. Try the other once.
+        useMatch = !useMatch;
+        connect(config, id, true);
+        return;
+      }
+      if (response.status === 401 || response.status === 403) {
+        // The hub refused the JWT (expired, or not for these topics).
+        // Reconnecting with the same token can't help: hand off so the
+        // consumer fetches a fresh config (and with it a fresh token).
+        console.warn('SyncMercure: hub refused the token (HTTP ' + response.status + ').');
+        failOver();
+        return;
+      }
+      if (!response.ok || !response.body) throw new Error('Mercure HTTP ' + response.status);
+      consecutiveErrors = 0;
+      retryMs = 1000;
+      return readEvents(response.body, id, function(data) {
+        onMercureMessage({ data: data });
+      });
+    }).catch(function(error) {
+      if (id !== connectionId || controller.signal.aborted || failedOver) return;
+      stream = null;
+      console.warn('SyncMercure: Mercure stream failed', error);
+      onMercureError();
+      if (!failedOver && id === connectionId) {
+        retryTimer = setTimeout(function() { retryTimer = null; connect(config, id, false); }, retryMs);
+        retryMs = Math.min(retryMs * 2, 30000);
+      }
+    });
   }
 
   function notifyTypingChange() {
@@ -161,7 +289,7 @@
     };
   }
 
-  // Topic routing: EventSource does not expose which topic an event arrived
+  // Topic routing: an SSE event does not say which topic it arrived
   // on, so we discriminate on the payload shape. Per the server contract,
   // main events carry an `event` field while typing events carry an
   // `action` field. Anything else is ignored.
@@ -216,40 +344,43 @@
 
   function onMercureError() {
     if (failedOver) return;
-    // EventSource transitions to CLOSED only on terminal failure (e.g. the
-    // hub returns 401). When readyState is CONNECTING the browser is
-    // already retrying, and `Last-Event-ID` will be sent automatically.
-    if (es && es.readyState === 2 /* CLOSED */) {
-      consecutiveErrors++;
-    } else {
-      consecutiveErrors++;
-    }
+    consecutiveErrors++;
     if (consecutiveErrors >= 2) {
-      failedOver = true;
-      try { if (es) es.close(); } catch (e) {}
-      es = null;
       console.warn('SyncMercure: Mercure connection failing; handing off to polling.');
-      if (activeHandlers && typeof activeHandlers.onFailover === 'function') {
-        try { activeHandlers.onFailover(); } catch (e) {}
-      }
+      failOver();
+    }
+  }
+
+  function failOver() {
+    if (failedOver) return;
+    failedOver = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+    if (stream) {
+      try { stream.abort(); } catch (e) {}
+    }
+    stream = null;
+    if (activeHandlers && typeof activeHandlers.onFailover === 'function') {
+      try { activeHandlers.onFailover(); } catch (e) {}
     }
   }
 
   window.SyncMercure = {
     init: function(config, handlers) {
       try {
-        if (!config || !config.hubUrl || !config.topics || !config.topics.main) {
+        if (!config || !config.hubUrl || !config.jwt || !config.topics || !config.topics.main) {
           console.warn('SyncMercure: config incomplete; skipping.');
           return false;
         }
-        if (typeof window.EventSource === 'undefined') {
-          console.warn('SyncMercure: EventSource not supported; Mercure unavailable.');
+        if (typeof window.fetch !== 'function' || typeof window.ReadableStream === 'undefined'
+            || typeof window.AbortController === 'undefined' || typeof window.TextDecoder === 'undefined') {
+          console.warn('SyncMercure: streaming fetch not supported; Mercure unavailable.');
           if (handlers && typeof handlers.onFailover === 'function') {
             try { handlers.onFailover(); } catch (e) {}
           }
           return false;
         }
-        if (es) {
+        if (stream || retryTimer) {
           // Already initialized; ignore duplicate init.
           return true;
         }
@@ -257,12 +388,12 @@
         activeHandlers = handlers || {};
         consecutiveErrors = 0;
         failedOver = false;
-        typingMap = new Map();
-
-        var url = buildHubUrl(config);
-        es = new EventSource(url);
-        es.onmessage = onMercureMessage;
-        es.onerror = onMercureError;
+        if (!typingMap) typingMap = new Map();
+        retryMs = 1000;
+        useMatch = Number(config.protocol || 0) >= 1;
+        // lastEventId survives a failover and re-init on purpose: the new
+        // stream (with a fresh token) resumes where the old one stopped.
+        connect(config, ++connectionId, false);
 
         if (config.topics.typing) {
           startTypingTick(config.heartbeatSeconds || 5);
@@ -332,11 +463,15 @@
 
     disconnect: function() {
       try {
-        if (es) {
-          try { es.close(); } catch (e) {}
+        connectionId++;
+        if (retryTimer) clearTimeout(retryTimer);
+        retryTimer = null;
+        if (stream) {
+          try { stream.abort(); } catch (e) {}
         }
       } finally {
-        es = null;
+        stream = null;
+        lastEventId = '';
         clearHeartbeat();
         stopTypingTick();
         if (typingMap) typingMap.clear();
@@ -379,7 +514,7 @@
     }, heartbeatSeconds * 1000);
   }
 
-  // Best-effort cleanup on unload so the hub sees the EventSource go away.
+  // Best-effort cleanup on unload so the hub sees the connection go away.
   window.addEventListener('beforeunload', function() {
     try {
       if (window.SyncMercure && window.SyncMercure.disconnect) {

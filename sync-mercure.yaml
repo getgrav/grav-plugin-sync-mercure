@@ -5,6 +5,14 @@ hub:
   internal_url: ''
   publisher_secret: ''
   subscriber_secret: ''
+  # Mercure protocol the hub speaks: auto (ask the hub), 1 (Mercure 1.x) or 0 (0.x).
+  protocol: auto
+  # Mercure 1.x: the `iss` of every token. Must match the hub's `issuer` block
+  # (MERCURE_TRUSTED_ISSUERS on the official image, which defaults to https://localhost).
+  issuer: 'https://localhost'
+  # Mercure 1.x: set when the hub pins `resource_identifier`; tokens always list
+  # the public and internal hub URLs as audiences too.
+  resource_identifier: ''
 
 topics:
   prefix: 'urn:grav:sync:'
