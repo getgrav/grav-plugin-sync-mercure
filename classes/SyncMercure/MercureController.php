@@ -17,7 +17,7 @@ use Psr\Http\Message\ServerRequestInterface;
  *
  *   POST /sync/mercure/token
  *     Body: { route, lang? }
- *     Returns: { hub, topic_doc, topic_aw, jwt, expires_in }
+ *     Returns: { hub, topic_doc, topic_aw, jwt, expires_in, room, protocol }
  *
  *   GET  /sync/mercure/capabilities (advisory; main capabilities endpoint
  *     in grav-plugin-sync's SyncController also reflects mercure
@@ -69,6 +69,9 @@ class MercureController extends AbstractApiController
             'jwt' => $jwt,
             'expires_in' => $ttl,
             'room' => $room->id,
+            // 1: subscribe with `match=` (Mercure 1.x), 0: `topic=` (0.x).
+            // The JWT goes in the Authorization header either way.
+            'protocol' => $bridge->protocolVersion(),
         ]);
     }
 

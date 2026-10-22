@@ -11,7 +11,10 @@
  * autoloader and the sync plugin (user/plugins/sync). Needs the `curl` CLI.
  * Starts two throwaway hubs on loopback: one with the Caddyfile
  * writeCaddyfile() generates, and one with `anonymous` on, like hubs
- * started before 1.2.2 until they are restarted.
+ * started before 1.2.2 until they are restarted. Works with a 0.x and a
+ * 1.x binary: the JWT directives and the subscribe parameter follow the
+ * binary's generation, and subscribers send the JWT in the Authorization
+ * header like the browser clients do.
  * Exits non-zero if any check fails.
  */
 
@@ -36,20 +39,27 @@ $loader->addPsr4('Grav\\Plugin\\SyncMercure\\', dirname(__DIR__) . '/classes/Syn
 $loader->addPsr4('Grav\\Plugin\\Sync\\', $gravRoot . '/user/plugins/sync/classes/Sync');
 require dirname(__DIR__) . '/vendor/autoload.php';
 
+$major = preg_match('/Mercure\.rocks\s+v?(\d+)\./', (string)shell_exec(escapeshellarg($bin) . ' version 2>/dev/null'), $m) ? (int)$m[1] : 0;
+echo 'Mercure ' . ($major >= 1 ? '1.x' : '0.x') . " binary\n";
+$jwtDirectives = $major >= 1
+    ? "        issuer https://localhost {\n            publisher {\n                jwt {env.MERCURE_PUBLISHER_JWT_KEY} HS256\n            }\n"
+        . "            subscriber {\n                jwt {env.MERCURE_SUBSCRIBER_JWT_KEY} HS256\n            }\n        }\n"
+    : "        publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}\n        subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}\n";
+$subscribeParam = $major >= 1 ? 'match' : 'topic';
+
 $work = sys_get_temp_dir() . '/sync-mercure-check-' . bin2hex(random_bytes(4));
 mkdir($work);
 $pubKey = bin2hex(random_bytes(32));
 $subKey = bin2hex(random_bytes(32));
 
 /** Start a hub; returns [process, base url]. */
-$startHub = function (bool $anonymous) use ($bin, $work, $pubKey, $subKey): array {
+$startHub = function (bool $anonymous) use ($bin, $work, $pubKey, $subKey, $jwtDirectives): array {
     $sock = stream_socket_server('tcp://127.0.0.1:0');
     $port = (int)substr(strrchr(stream_socket_get_name($sock, false), ':'), 1);
     fclose($sock);
     $file = "{$work}/Caddyfile." . ($anonymous ? 'anon' : 'current');
     file_put_contents($file, "{\n    auto_https off\n    admin off\n}\n\nhttp://127.0.0.1:{$port} {\n    mercure {\n"
-        . "        transport local\n        publisher_jwt {env.MERCURE_PUBLISHER_JWT_KEY}\n"
-        . "        subscriber_jwt {env.MERCURE_SUBSCRIBER_JWT_KEY}\n        cors_origins *\n"
+        . "        transport local\n" . $jwtDirectives . "        cors_origins *\n"
         . ($anonymous ? "        anonymous\n" : '') . "    }\n}\n");
     $env = ['MERCURE_PUBLISHER_JWT_KEY' => $pubKey, 'MERCURE_SUBSCRIBER_JWT_KEY' => $subKey, 'PATH' => getenv('PATH')];
     $proc = proc_open([$bin, 'run', '--config', $file, '--adapter', 'caddyfile'], [1 => ['file', "{$file}.log", 'w'], 2 => ['file', "{$file}.log", 'a']], $pipes, $work, $env);
@@ -75,13 +85,16 @@ $bridgeFor = fn (string $hub): MercureBridge => new MercureBridge(new Config(['p
  * @param list<string> $topics
  * @return array{status: int, received: list<string>}
  */
-$listen = function (string $hub, array $topics, ?string $jwt, callable $publish) use ($work): array {
-    $query = implode('&', array_map(static fn (string $t): string => 'topic=' . rawurlencode($t), $topics));
-    if ($jwt !== null) {
-        $query .= '&authorization=' . rawurlencode($jwt);
-    }
+$listen = function (string $hub, array $topics, ?string $jwt, callable $publish) use ($work, $subscribeParam): array {
+    $query = implode('&', array_map(static fn (string $t): string => $subscribeParam . '=' . rawurlencode($t), $topics));
     $out = "{$work}/sub-" . bin2hex(random_bytes(3));
-    $proc = proc_open(['curl', '-sN', '-m', '3', '-o', $out, '-w', '%{http_code}', "{$hub}?{$query}"], [1 => ['pipe', 'w']], $pipes);
+    $args = ['curl', '-sN', '-m', '3', '-o', $out, '-w', '%{http_code}'];
+    if ($jwt !== null) {
+        $args[] = '-H';
+        $args[] = 'Authorization: Bearer ' . $jwt;
+    }
+    $args[] = "{$hub}?{$query}";
+    $proc = proc_open($args, [1 => ['pipe', 'w']], $pipes);
     usleep(700_000); // let the subscription register before publishing
     $publish();
     $status = (int)stream_get_contents($pipes[1]);

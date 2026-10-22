@@ -127,6 +127,9 @@ final class MercureTransport implements TransportInterface
             'jwt' => $jwt,
             'topics' => $topics,
             'apiVersion' => MercureBridge::API_VERSION,
+            // 1: subscribe with `match=` (Mercure 1.x), 0: `topic=` (0.x).
+            // Clients send the JWT in the Authorization header either way.
+            'protocol' => $this->bridge->protocolVersion(),
         ];
     }
 
